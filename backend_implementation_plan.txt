@@ -68,3 +68,6 @@ CURRENT EXECUTION
 [x] Step 6: Integrate frontend sign-in/sign-up pages with backend auth and persisted session state
 [x] Step 7: Remove unrelated backend npm artifacts (package files + node_modules)
 [x] Step 8: Add frontend auth bootstrap with automatic refresh on expired access tokens
+[x] Step 9: Start option 2 by wiring feed/post/comments to backend post APIs with fallback support
+[x] Step 10: Implement option 1 for home feed actions (backend like/comment wiring + double-tap like, no single-tap detail)
+[x] Step 11: Add inline home-feed comment composer with backend create-comment action

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     display_name VARCHAR(80) NOT NULL,
     bio TEXT,
+    location VARCHAR(120),
     avatar_url TEXT,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,

@@ -24,7 +24,7 @@ class Post(Base):
     author_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     character_id: Mapped[int | None] = mapped_column(ForeignKey("characters.id", ondelete="SET NULL"), nullable=True, index=True)
     topic_id: Mapped[int | None] = mapped_column(ForeignKey("topics.id", ondelete="SET NULL"), nullable=True, index=True)
-    series_id: Mapped[int | None] = mapped_column(ForeignKey("series.id", ondelete="SET NULL"), nullable=True, index=True)
+    series_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(180), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     context: Mapped[str] = mapped_column(Text, nullable=False, default="")
