@@ -16,6 +16,28 @@ FastAPI backend scaffold aligned with Gist frontend + Gist Image Generator datab
 4. Run API:
 	- `uvicorn app.main:app --reload --port 8000`
 
+## Local First, AWS Later
+- Recommended during development: run PostgreSQL locally to avoid cloud costs.
+- This repo includes a bootstrap script that creates a local Postgres container and applies schema:
+	- `powershell -ExecutionPolicy Bypass -File .\scripts\setup_local_postgres.ps1`
+
+After the script runs, use these local DB values in `.env`:
+- `DB_HOST=localhost`
+- `DB_PORT=5432`
+- `DB_NAME=gist`
+- `DB_USER=gist`
+- `DB_PASSWORD=gistpass`
+
+To switch to AWS later, keep the same schema and only change DB env values:
+- `DB_HOST=<your-rds-endpoint>`
+- `DB_PORT=5432`
+- `DB_NAME=<your-db-name>`
+- `DB_USER=<your-db-user>`
+- `DB_PASSWORD=<your-db-password>`
+
+Then apply schema to AWS Postgres (from local machine with `psql`):
+- `psql "host=<your-rds-endpoint> port=5432 dbname=<your-db-name> user=<your-db-user> password=<your-db-password>" -f .\app\db\001_initial_platform_schema.sql`
+
 ## Endpoints
 - `GET /` service metadata
 - `GET /api/v1/health` liveness check

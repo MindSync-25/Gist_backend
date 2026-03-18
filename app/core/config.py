@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_minutes: int = 20160
 
+    # AWS / S3
+    aws_region: str = "ap-south-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    s3_bucket_name: str = "gist-comics-ap-south-1"
+    s3_user_uploads_prefix: str = "user-uploads/"
+    s3_presign_expiry_seconds: int = 300  # 5 min to complete upload
+
     @property
     def database_url(self) -> str:
         return (
