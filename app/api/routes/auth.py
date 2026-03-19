@@ -26,6 +26,7 @@ from app.schemas.auth import (
     RefreshIn,
     SignInIn,
     SignUpIn,
+    ChangePasswordIn,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -274,6 +275,13 @@ def update_me(
             normalized_location = location.strip()
             current_user.location = normalized_location or None
 
+    if "language" in updates:
+        language = updates["language"]
+        if language is None:
+            current_user.language = "en"
+        else:
+            current_user.language = language.strip() or "en"
+
     if "avatar_url" in updates:
         avatar_url = updates["avatar_url"]
         if avatar_url is None:
@@ -292,3 +300,21 @@ def update_me(
         _delete_previous_avatar_if_needed(previous_avatar_url, current_user.avatar_url)
 
     return _to_auth_user_out(current_user)
+
+@router.post('/change-password')
+def change_password(
+    payload: ChangePasswordIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Incorrect current password'
+        )
+    
+    current_user.hashed_password = hash_password(payload.new_password)
+    current_user.updated_at = datetime.now(UTC)
+    db.commit()
+    return {'message': 'Password updated successfully'}
+

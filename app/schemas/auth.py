@@ -11,6 +11,7 @@ class AuthUserOut(BaseModel):
     bio: str | None = None
     location: str | None = None
     avatar_url: str | None = None
+    language: str | None = "en"
     avatar_display_url: str | None = None
     avatar_display_expires_at: datetime | None = None
 
@@ -44,6 +45,7 @@ class ProfileUpdateIn(BaseModel):
     bio: str | None = Field(default=None, max_length=280)
     location: str | None = Field(default=None, max_length=120)
     avatar_url: str | None = Field(default=None, max_length=2048)
+    language: str | None = Field(default=None, max_length=10)
 
 
 class LogoutOut(BaseModel):
@@ -57,3 +59,8 @@ class AuthTokenOut(BaseModel):
     refresh_expires_in_seconds: int
     token_type: str = "bearer"
     user: AuthUserOut
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
