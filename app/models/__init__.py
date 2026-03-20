@@ -9,17 +9,27 @@ from app.models.post_reaction import PostReaction
 from app.models.post_share import PostShare
 from app.models.topic import Topic
 from app.models.user import User
+from app.models.voice_issue import VoiceIssue
+from app.models.voice_stance import VoiceStance
+from app.models.voice_take import VoiceTake
+from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
 
 __all__ = [
-	"Bookmark",
-	"Character",
-	"Comment",
-	"CommentReaction",
-	"Comic",
-	"Post",
-	"PostMetric",
-	"PostReaction",
-	"PostShare",
-	"Topic",
-	"User",
+        "Bookmark",
+        "Character",
+        "Comment",
+        "CommentReaction",
+        "Comic",
+        "Post",
+        "PostMetric",
+        "PostReaction",
+        "PostShare",
+        "Topic",
+        "User",
+        "VoiceIssue",
+        "VoiceStance",
+        "VoiceTake",
+        "VoicePoll",
+        "VoicePollOption",
+        "VoicePollVote",
 ]

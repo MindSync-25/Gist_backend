@@ -33,3 +33,6 @@ def ensure_runtime_schema() -> None:
     """Apply safe runtime schema adjustments for local/dev environments."""
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS location VARCHAR(120)"))
+        # Older local schemas from 001 set voice_takes.stance as NOT NULL.
+        # Voice comments can be neutral (no stance), so we normalize this at startup.
+        conn.execute(text("ALTER TABLE IF EXISTS voice_takes ALTER COLUMN stance DROP NOT NULL"))
