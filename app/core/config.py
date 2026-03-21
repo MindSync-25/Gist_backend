@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "gist-comics-ap-south-1"
     s3_user_uploads_prefix: str = "user-uploads/"
     s3_presign_expiry_seconds: int = 300  # 5 min to complete upload
+    s3_content_presign_expiry_seconds: int = 86400  # 24 hr for serving feed images
 
     @property
     def database_url(self) -> str:
