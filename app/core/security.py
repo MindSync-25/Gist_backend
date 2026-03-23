@@ -1,19 +1,23 @@
+import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.core.config import get_settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def _create_token(subject: str, token_type: str, expires_minutes: int) -> str:
@@ -73,3 +77,17 @@ def decode_refresh_token(token: str) -> str | None:
     if not isinstance(sub, str):
         return None
     return sub
+
+
+def create_otp_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def hash_otp(identifier: str, otp: str) -> str:
+    settings = get_settings()
+    msg = f"{identifier.lower().strip()}:{otp}".encode("utf-8")
+    return hmac.new(settings.jwt_secret.encode("utf-8"), msg, sha256).hexdigest()
+
+
+def verify_otp(identifier: str, otp: str, otp_hash: str) -> bool:
+    return hmac.compare_digest(hash_otp(identifier, otp), otp_hash)
