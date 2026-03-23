@@ -1,0 +1,100 @@
+﻿[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/anyio/to_thread.py", line 63, in run_sync
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return await get_async_backend().run_sync_in_worker_thread(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        func, args, abandon_on_cancel=abandon_on_cancel, limiter=limiter
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 2502, in run_sync_in_worker_thread
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return await future
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/anyio/_backends/_asyncio.py", line 986, in run
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    result = context.run(func, *args)
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/app/app/api/routes/auth.py", line 99, in sign_up
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    existing = db.execute(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]               ~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        select(User).where(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ...<4 lines>...
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ).scalar_one_or_none()
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/orm/session.py", line 2365, in execute
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return self._execute_internal(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        statement,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ...<4 lines>...
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        _add_event=_add_event,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/orm/session.py", line 2251, in _execute_internal
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    result: Result[Any] = compile_state_cls.orm_execute_statement(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        self,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ...<4 lines>...
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        conn,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/orm/context.py", line 306, in orm_execute_statement
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    result = conn.execute(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        statement, params or {}, execution_options=execution_options
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1419, in execute
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return meth(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        self,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        distilled_parameters,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        execution_options or NO_OPTIONS,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/sql/elements.py", line 526, in _execute_on_connection
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return connection._execute_clauseelement(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        self, distilled_params, execution_options
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1641, in _execute_clauseelement
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ret = self._execute_context(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        dialect,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ...<8 lines>...
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        cache_hit=cache_hit,
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1846, in _execute_context
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    return self._exec_single_context(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        dialect, context, statement, parameters
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1986, in _exec_single_context
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    self._handle_dbapi_exception(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        e, str_statement, effective_parameters, cursor, context
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 2355, in _handle_dbapi_exception
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/base.py", line 1967, in _exec_single_context
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    self.dialect.do_execute(
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ~~~~~~~~~~~~~~~~~~~~~~~^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        cursor, str_statement, effective_parameters, context
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    )
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]  File "/usr/local/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 951, in do_execute
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    cursor.execute(statement, parameters)
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]sqlalchemy.exc.ProgrammingError: (psycopg2.errors.UndefinedColumn) column users.language does not exist
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]LINE 1: ...ame, users.bio, users.location, users.avatar_url, users.lang...
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]                                                             ^
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m][SQL: SELECT users.id, users.username, users.email, users.password_hash, users.display_name, users.bio, users.location, users.avatar_url, users.language, users.is_active, users.is_verified, users.created_at, users.updated_at, users.last_login_at
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]FROM users
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m]WHERE users.email = %(email_1)s OR users.username = %(username_1)s]
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m][parameters: {'email_1': 'rajanil06440@gmail.com', 'username_1': 'Anil Bhavanam'}]
+[2m2026-03-22T07:48:18Z[0m app[d894755aede138] [32mbom[0m [[34minfo[0m](Background on this error at: https://sqlalche.me/e/20/f405)
