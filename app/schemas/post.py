@@ -1,6 +1,17 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+class ImageStylePayload(BaseModel):
+    filter: Literal["none", "warm", "cool", "dramatic", "fade"] | None = None
+    frame: Literal["none", "classic", "polaroid", "neon"] | None = None
+    overlay_text: str | None = Field(default=None, max_length=180)
+    overlay_position: Literal["top", "center", "bottom"] | None = None
+    zoom: float | None = Field(default=None, ge=1, le=2.5)
+    offset_x: float | None = None
+    offset_y: float | None = None
 
 
 class PostOut(BaseModel):
@@ -21,6 +32,7 @@ class PostOut(BaseModel):
     context: str
     image_url: str | None = None
     image_aspect_ratio: float | None = None
+    image_style: ImageStylePayload | None = None
     format: str
     status: str
     published_at: datetime
@@ -41,6 +53,7 @@ class PostCreateIn(BaseModel):
     context: str = ""
     image_url: str | None = None
     image_aspect_ratio: float | None = Field(default=None, gt=0, le=10)
+    image_style: ImageStylePayload | None = None
     format: str = Field(
         default="hero",
         pattern="^(hero|conversation|editorial|floating|magazine|immersive|x-thread)$",

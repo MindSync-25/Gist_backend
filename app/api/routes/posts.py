@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.avatar_signing import build_avatar_display_url
+from app.core.avatar_signing import build_avatar_display_url, extract_managed_user_upload_key
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.api.deps import get_current_user
@@ -106,6 +106,7 @@ def _map_post_out(
         context=post.context,
         image_url=_resolve_image_url(post.image_url),
         image_aspect_ratio=float(post.image_aspect_ratio) if post.image_aspect_ratio is not None else None,
+        image_style=post.image_style,
         format=post.format,
         status=post.status,
         published_at=post.published_at,
@@ -167,9 +168,34 @@ def _map_comment_out(
     )
 
 
+def _delete_managed_image_from_s3(image_url: str | None) -> None:
+    object_key = extract_managed_user_upload_key(image_url)
+    if not object_key:
+        return
+
+    settings = get_settings()
+    try:
+        _s3_client().delete_object(Bucket=settings.s3_bucket_name, Key=object_key)
+    except Exception:
+        # Keep post deletion resilient even if storage cleanup fails.
+        return
+
+
 @router.post("", response_model=PostOut, status_code=201)
 def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut:
     now = datetime.now(timezone.utc)
+    image_style_payload = payload.image_style.model_dump(exclude_none=True) if payload.image_style is not None else None
+    if payload.image_url and not image_style_payload:
+        # Keep style replay deterministic even for older clients that don't send image_style yet.
+        image_style_payload = {
+            "filter": "none",
+            "frame": "none",
+            "overlay_position": "bottom",
+            "zoom": 1.0,
+            "offset_x": 0.0,
+            "offset_y": 0.0,
+        }
+
     post = Post(
         source_type="native",
         author_user_id=payload.author_user_id,
@@ -181,6 +207,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         context=payload.context,
         image_url=payload.image_url,
         image_aspect_ratio=payload.image_aspect_ratio,
+        image_style=image_style_payload,
         format=payload.format,
         status="published",
         published_at=now,
@@ -644,15 +671,15 @@ def delete_post(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    post = db.query(Post).filter(Post.id == post_id, Post.status != "deleted").first()
+    post = db.query(Post).filter(Post.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
     if post.author_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this post")
 
-    post.status = "deleted"
-    post.updated_at = datetime.now(timezone.utc)
+    _delete_managed_image_from_s3(post.image_url)
+    db.delete(post)
     db.commit()
 
     return PostDeleteOut(ok=True, post_id=post_id)
