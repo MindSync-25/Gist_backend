@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS posts (
     context TEXT NOT NULL DEFAULT '',
     image_url TEXT,
     image_aspect_ratio NUMERIC(5,2),
+    image_style JSONB,
     format VARCHAR(20) NOT NULL DEFAULT 'hero',
     status VARCHAR(20) NOT NULL DEFAULT 'published',
     published_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

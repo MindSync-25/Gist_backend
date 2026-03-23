@@ -90,3 +90,20 @@ def ensure_runtime_schema() -> None:
         # Older local schemas from 001 set voice_takes.stance as NOT NULL.
         # Voice comments can be neutral (no stance), so we normalize this at startup.
         conn.execute(text("ALTER TABLE IF EXISTS voice_takes ALTER COLUMN stance DROP NOT NULL"))
+
+        # Backfill older voice schemas that missed the slug column.
+        conn.execute(text("ALTER TABLE IF EXISTS voice_issues ADD COLUMN IF NOT EXISTS slug VARCHAR(300)"))
+        conn.execute(
+            text(
+                """
+                UPDATE voice_issues
+                SET slug = (
+                    COALESCE(NULLIF(lower(replace(trim(title), ' ', '-')), ''), 'issue')
+                    || '-' || id::text
+                )
+                WHERE slug IS NULL OR slug = ''
+                """
+            )
+        )
+        conn.execute(text("ALTER TABLE IF EXISTS voice_issues ALTER COLUMN slug SET NOT NULL"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_issues_slug ON voice_issues (slug)"))
