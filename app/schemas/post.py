@@ -31,6 +31,7 @@ class PostOut(BaseModel):
     description: str
     context: str
     image_url: str | None = None
+    video_url: str | None = None
     image_aspect_ratio: float | None = None
     image_style: ImageStylePayload | None = None
     format: str
@@ -52,6 +53,7 @@ class PostCreateIn(BaseModel):
     description: str = ""
     context: str = ""
     image_url: str | None = None
+    video_url: str | None = None
     image_aspect_ratio: float | None = Field(default=None, gt=0, le=10)
     image_style: ImageStylePayload | None = None
     format: str = Field(
