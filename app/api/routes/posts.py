@@ -105,6 +105,7 @@ def _map_post_out(
         description=post.description,
         context=post.context,
         image_url=_resolve_image_url(post.image_url),
+        video_url=_resolve_image_url(post.video_url),
         image_aspect_ratio=float(post.image_aspect_ratio) if post.image_aspect_ratio is not None else None,
         image_style=post.image_style,
         format=post.format,
@@ -181,6 +182,11 @@ def _delete_managed_image_from_s3(image_url: str | None) -> None:
         return
 
 
+def _delete_managed_media_from_s3(image_url: str | None, video_url: str | None) -> None:
+    _delete_managed_image_from_s3(image_url)
+    _delete_managed_image_from_s3(video_url)
+
+
 @router.post("", response_model=PostOut, status_code=201)
 def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut:
     now = datetime.now(timezone.utc)
@@ -206,6 +212,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         description=payload.description,
         context=payload.context,
         image_url=payload.image_url,
+        video_url=payload.video_url,
         image_aspect_ratio=payload.image_aspect_ratio,
         image_style=image_style_payload,
         format=payload.format,
@@ -678,7 +685,7 @@ def delete_post(
     if post.author_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not authorized to delete this post")
 
-    _delete_managed_image_from_s3(post.image_url)
+    _delete_managed_media_from_s3(post.image_url, post.video_url)
     db.delete(post)
     db.commit()
 

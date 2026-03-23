@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS posts (
     description TEXT NOT NULL DEFAULT '',
     context TEXT NOT NULL DEFAULT '',
     image_url TEXT,
+    video_url TEXT,
     image_aspect_ratio NUMERIC(5,2),
     image_style JSONB,
     format VARCHAR(20) NOT NULL DEFAULT 'hero',

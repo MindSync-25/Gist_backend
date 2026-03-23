@@ -16,9 +16,12 @@ ALLOWED_IMAGE_TYPES = {
     "image/png",
     "image/webp",
     "image/gif",
+    "video/mp4",
+    "video/quicktime",
+    "video/webm",
 }
 
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
+MAX_FILE_SIZE_BYTES = 80 * 1024 * 1024  # 80 MB
 
 
 class PresignResponse(BaseModel):

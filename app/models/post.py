@@ -29,6 +29,7 @@ class Post(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     context: Mapped[str] = mapped_column(Text, nullable=False, default="")
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_aspect_ratio: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     image_style: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     format: Mapped[str] = mapped_column(String(20), nullable=False, default="hero")
