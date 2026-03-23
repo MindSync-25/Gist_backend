@@ -1,0 +1,73 @@
+GIST Backend Implementation Plan
+
+How to use:
+- [ ] = pending
+- [~] = in progress
+- [x] = done
+- If needed, erase completed lines after verification.
+
+Date started: 2026-03-15
+Owner: Backend team
+
+DATABASE STRATEGY (cost-aware)
+- RDS (authoritative relational core): users, auth, topics, characters, posts, comments, series metadata.
+- DynamoDB (high-write/event workloads): reactions stream + counters, notifications inbox, messages timeline, voice votes/takes event fanout.
+- Start with RDS for correctness and faster delivery; add DynamoDB in phase 2+ where write load and cost benefit are clear.
+
+PHASE 0 - Planning And Data Design
+[x] Build a final backend plan from frontend + image generator requirements
+[x] Create initial PostgreSQL schema (users, posts, metrics, comments, reactions, shares, messages, voice, series, notifications)
+[x] Add DB index and constraint strategy for high-read feed + high-write engagement
+[x] Add seed strategy for reference data (topics, characters)
+
+PHASE 1 - Auth + Users
+[x] Create users table model + schema + auth password hashing
+[x] Implement auth APIs: sign-up, sign-in, me, refresh, logout
+[x] Add JWT dependency + protected route utility
+
+PHASE 2 - Feed Core
+[~] Create posts + post_metrics + post_reactions + shares data layer
+[ ] Keep compatibility with existing comics feed during migration
+[~] Implement APIs: list posts, get post, react, share
+
+PHASE 3 - Comments
+[~] Create comments + comment_reactions data layer with threaded replies
+[~] Implement APIs: list comments, create comment, react to comment
+
+PHASE 4 - Reference APIs
+[x] Create topics API from DB
+[x] Create characters API from DB
+
+PHASE 5 - Voice
+[ ] Create voice_issue + voice_vote + voice_take + voice_take_reply tables
+[ ] Implement APIs: list issues, issue detail, cast stance vote, post take, reply
+
+PHASE 6 - Series
+[ ] Create series + series_items + series_subscriptions tables
+[ ] Implement APIs: list series, series detail, subscribe, progress
+
+PHASE 7 - Messages
+[ ] Create conversations + conversation_members + messages tables
+[ ] Implement APIs: list conversations, list/send messages, unread counts
+
+PHASE 8 - Notifications
+[ ] Create notifications table + producer hooks
+[ ] Implement APIs: list notifications, mark read, mark all read
+
+PHASE 9 - Frontend Integration + Validation
+[ ] Replace frontend mock API functions with backend calls one module at a time
+[ ] Add integration tests for auth/feed/comments/reactions/voice/messages
+[ ] Run staged rollout and monitor DB/query performance
+
+CURRENT EXECUTION
+[x] Step 1: Commit initial SQL schema file in backend
+[x] Step 2: Add ORM models for phase-1 to phase-3 tables
+[x] Step 3: Implement first production APIs (topics + characters + post detail + comments)
+[x] Step 4: Remove communities from frontend and backend data model
+[x] Step 5: Implement auth APIs (sign-up, sign-in, me, refresh, logout)
+[x] Step 6: Integrate frontend sign-in/sign-up pages with backend auth and persisted session state
+[x] Step 7: Remove unrelated backend npm artifacts (package files + node_modules)
+[x] Step 8: Add frontend auth bootstrap with automatic refresh on expired access tokens
+[x] Step 9: Start option 2 by wiring feed/post/comments to backend post APIs with fallback support
+[x] Step 10: Implement option 1 for home feed actions (backend like/comment wiring + double-tap like, no single-tap detail)
+[x] Step 11: Add inline home-feed comment composer with backend create-comment action
