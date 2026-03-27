@@ -22,7 +22,7 @@ from app.core.security import (
     verify_otp,
     verify_password,
 )
-from app.core.social_auth import verify_social_id_token
+from app.core.social_auth import exchange_google_auth_code, verify_social_id_token
 from app.models.user import User
 from app.schemas.auth import (
     AuthTokenOut,
@@ -328,7 +328,21 @@ def sign_in(payload: SignInIn, db: Session = Depends(get_db)) -> AuthTokenOut:
 @router.post("/social/sign-in", response_model=AuthTokenOut)
 def social_sign_in(payload: SocialSignInIn, db: Session = Depends(get_db)) -> AuthTokenOut:
     try:
-        identity = verify_social_id_token(payload.provider, payload.id_token, fallback_email=payload.email)
+        if payload.code:
+            # Android authorization code flow
+            if not payload.redirect_uri:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="redirect_uri is required for code flow")
+            identity = exchange_google_auth_code(
+                code=payload.code,
+                redirect_uri=payload.redirect_uri,
+                code_verifier=payload.code_verifier,
+            )
+        elif payload.id_token:
+            identity = verify_social_id_token(payload.provider, payload.id_token, fallback_email=payload.email)
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Either id_token or code is required")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Social sign-in failed: {exc}") from exc
 

@@ -107,3 +107,36 @@ def ensure_runtime_schema() -> None:
         )
         conn.execute(text("ALTER TABLE IF EXISTS voice_issues ALTER COLUMN slug SET NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_issues_slug ON voice_issues (slug)"))
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS sponsored_campaigns (
+                    id BIGSERIAL PRIMARY KEY,
+                    name VARCHAR(120) NOT NULL,
+                    placement VARCHAR(30) NOT NULL DEFAULT 'home_feed',
+                    sponsor_name VARCHAR(120) NOT NULL,
+                    headline VARCHAR(180) NOT NULL,
+                    body TEXT NOT NULL DEFAULT '',
+                    cta_label VARCHAR(40) NOT NULL DEFAULT 'Learn More',
+                    target_url TEXT NOT NULL,
+                    image_url TEXT NULL,
+                    category VARCHAR(60) NULL,
+                    priority INT NOT NULL DEFAULT 100,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    starts_at TIMESTAMPTZ NULL,
+                    ends_at TIMESTAMPTZ NULL,
+                    ad_network VARCHAR(30) NULL,
+                    ad_unit_id VARCHAR(180) NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ck_sponsored_campaigns_placement CHECK (placement IN ('home_feed'))
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_sponsored_campaigns_feed_lookup ON sponsored_campaigns (placement, is_active, priority, id DESC)"
+            )
+        )

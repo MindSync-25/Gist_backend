@@ -42,3 +42,10 @@ class CommentReactionOut(BaseModel):
     reaction_type: str
     reactions_count: int
     liked: bool
+
+
+class CommentDeleteOut(BaseModel):
+    ok: bool
+    post_id: int
+    comment_id: int
+    deleted_count: int

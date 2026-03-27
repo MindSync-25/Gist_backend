@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.avatar_signing import build_avatar_display_url, extract_managed_user_upload_key
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.notifications import create_notification, fanout_new_post_notifications
 from app.api.deps import get_current_user
 from app.models.bookmark import Bookmark
 from app.models.comment import Comment
@@ -18,7 +19,7 @@ from app.models.post_metric import PostMetric
 from app.models.post_reaction import PostReaction
 from app.models.post_share import PostShare
 from app.models.user import User
-from app.schemas.comment import CommentCreateIn, CommentOut, CommentReactionIn, CommentReactionOut
+from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
 from app.schemas.post import PostBookmarkIn, PostBookmarkOut, PostCreateIn, PostOut, PostReactionIn, PostReactionOut, PostShareIn, PostShareOut, PostUpdateIn, PostDeleteOut
 
 router = APIRouter(prefix="/posts", tags=["posts"])
@@ -224,6 +225,20 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
 
     metric = PostMetric(post_id=post.id)
     db.add(metric)
+
+    try:
+        fanout_new_post_notifications(
+            db,
+            post_id=int(post.id),
+            author_user_id=int(payload.author_user_id),
+            topic_id=payload.topic_id,
+            series_id=payload.series_id,
+            title=payload.title,
+        )
+    except Exception:
+        # Never block content creation on notification fanout.
+        pass
+
     db.commit()
     db.refresh(post)
     db.refresh(metric)
@@ -467,7 +482,7 @@ def create_comment(
     payload: CommentCreateIn,
     db: Session = Depends(get_db),
 ) -> CommentOut:
-    _ensure_post_exists(db, post_id)
+    post = _ensure_post_exists(db, post_id)
 
     if payload.parent_comment_id is not None:
         parent = db.get(Comment, payload.parent_comment_id)
@@ -492,6 +507,48 @@ def create_comment(
     if parent is not None:
         parent.replies_count += 1
         parent.updated_at = datetime.now(timezone.utc)
+
+    db.flush()
+
+    try:
+        if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+            create_notification(
+                db,
+                recipient_user_id=int(post.author_user_id),
+                actor_user_id=int(payload.user_id),
+                notification_type="post_comment",
+                entity_type="post",
+                entity_id=int(post_id),
+                payload={
+                    "kind": "post_comment",
+                    "post_id": int(post_id),
+                    "comment_id": int(comment.id),
+                },
+            )
+
+        if (
+            parent is not None
+            and parent.user_id is not None
+            and int(parent.user_id) != int(payload.user_id)
+            and int(parent.user_id) != int(post.author_user_id or -1)
+        ):
+            create_notification(
+                db,
+                recipient_user_id=int(parent.user_id),
+                actor_user_id=int(payload.user_id),
+                notification_type="comment_reply",
+                entity_type="comment",
+                entity_id=int(parent.id),
+                payload={
+                    "kind": "comment_reply",
+                    "post_id": int(post_id),
+                    "parent_comment_id": int(parent.id),
+                    "comment_id": int(comment.id),
+                },
+            )
+    except Exception:
+        # Comment creation should still succeed if notification write fails.
+        pass
 
     db.commit()
     db.refresh(comment)
@@ -554,13 +611,68 @@ def react_to_comment(
     )
 
 
+@router.delete("/{post_id}/comments/{comment_id}", response_model=CommentDeleteOut)
+def delete_comment(
+    post_id: int,
+    comment_id: int,
+    user_id: int = Query(gt=0),
+    db: Session = Depends(get_db),
+) -> CommentDeleteOut:
+    _ensure_post_exists(db, post_id)
+
+    comment = db.get(Comment, comment_id)
+    if comment is None or comment.post_id != post_id:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    if comment.user_id != user_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own comment")
+
+    comments_to_delete = [comment]
+    direct_replies = db.execute(
+        select(Comment).where(
+            Comment.post_id == post_id,
+            Comment.parent_comment_id == comment.id,
+            Comment.status != "deleted",
+        )
+    ).scalars().all()
+    comments_to_delete.extend(direct_replies)
+
+    deleted_count = 0
+    for item in comments_to_delete:
+        if item.status == "deleted":
+            continue
+        item.status = "deleted"
+        item.updated_at = datetime.now(timezone.utc)
+        deleted_count += 1
+
+    if comment.parent_comment_id is not None:
+        parent = db.get(Comment, comment.parent_comment_id)
+        if parent is not None:
+            parent.replies_count = max(0, parent.replies_count - 1)
+            parent.updated_at = datetime.now(timezone.utc)
+
+    if deleted_count > 0:
+        metrics = _get_or_create_metrics(db, post_id)
+        metrics.comments_count = max(0, metrics.comments_count - deleted_count)
+        metrics.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+
+    return CommentDeleteOut(
+        ok=True,
+        post_id=post_id,
+        comment_id=comment_id,
+        deleted_count=deleted_count,
+    )
+
+
 @router.post("/{post_id}/reactions", response_model=PostReactionOut)
 def react_to_post(
     post_id: int,
     payload: PostReactionIn,
     db: Session = Depends(get_db),
 ) -> PostReactionOut:
-    _ensure_post_exists(db, post_id)
+    post = _ensure_post_exists(db, post_id)
 
     existing = db.execute(
         select(PostReaction).where(
@@ -581,6 +693,23 @@ def react_to_post(
             )
         )
         metrics.likes_count += 1
+        try:
+            if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+                create_notification(
+                    db,
+                    recipient_user_id=int(post.author_user_id),
+                    actor_user_id=int(payload.user_id),
+                    notification_type="post_reaction",
+                    entity_type="post",
+                    entity_id=int(post_id),
+                    payload={
+                        "kind": "post_reaction",
+                        "post_id": int(post_id),
+                        "reaction_type": payload.reaction_type,
+                    },
+                )
+        except Exception:
+            pass
     elif existing.reaction_type == payload.reaction_type:
         db.delete(existing)
         metrics.likes_count = max(0, metrics.likes_count - 1)

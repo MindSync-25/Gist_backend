@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
 
     google_oauth_client_id: str = ""
+    google_oauth_client_ids: str = ""
+    google_client_secret: str = ""
     apple_oauth_client_id: str = ""
 
     # AWS / S3
@@ -54,6 +56,7 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
     s3_bucket_name: str = "gist-comics-ap-south-1"
+    dynamodb_messages_table: str = "gist-messages"
     s3_user_uploads_prefix: str = "user-uploads/"
     s3_presign_expiry_seconds: int = 300  # 5 min to complete upload
     s3_content_presign_expiry_seconds: int = 86400  # 24 hr for serving feed images
@@ -93,6 +96,13 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    @property
+    def google_oauth_allowed_client_ids(self) -> set[str]:
+        allowed = {item.strip() for item in self.google_oauth_client_ids.split(",") if item.strip()}
+        if self.google_oauth_client_id.strip():
+            allowed.add(self.google_oauth_client_id.strip())
+        return allowed
 
 
 @lru_cache
