@@ -24,13 +24,47 @@ def _http_get_json(url: str) -> dict:
     return json.loads(payload)
 
 
+def exchange_google_auth_code(code: str, redirect_uri: str, code_verifier: str | None = None) -> SocialIdentity:
+    """Exchange a Google authorization code for an id_token, then verify it."""
+    settings = get_settings()
+    if not settings.google_client_secret:
+        raise ValueError("GOOGLE_CLIENT_SECRET is not configured on the server")
+
+    params: dict[str, str] = {
+        "code": code,
+        "client_id": settings.google_oauth_client_id,
+        "client_secret": settings.google_client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        params["code_verifier"] = code_verifier
+
+    body = urllib.parse.urlencode(params).encode()
+    req = urllib.request.Request(
+        "https://oauth2.googleapis.com/token",
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        token_data = json.loads(resp.read().decode())
+
+    id_token = token_data.get("id_token")
+    if not id_token:
+        raise ValueError("Google token exchange did not return an id_token")
+
+    return verify_google_id_token(id_token)
+
+
 def verify_google_id_token(id_token: str) -> SocialIdentity:
     settings = get_settings()
     qs = urllib.parse.urlencode({"id_token": id_token})
     data = _http_get_json(f"https://oauth2.googleapis.com/tokeninfo?{qs}")
 
     aud = str(data.get("aud", ""))
-    if settings.google_oauth_client_id and aud != settings.google_oauth_client_id:
+    allowed_client_ids = settings.google_oauth_allowed_client_ids
+    if allowed_client_ids and aud not in allowed_client_ids:
         raise ValueError("Google token audience mismatch")
 
     email = str(data.get("email", "")).strip().lower()

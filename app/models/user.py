@@ -28,3 +28,4 @@ class User(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expo_push_token: Mapped[str | None] = mapped_column(Text, nullable=True)

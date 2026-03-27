@@ -8,6 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.notifications import create_notification
 from app.models.user import User
 from app.models.voice_issue import VoiceIssue
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
@@ -96,6 +97,21 @@ def _poll_options_with_pct(options: list[VoicePollOption], total_votes: int) -> 
         )
         for opt in options
     ]
+
+
+def _delete_expired_polls(db: Session) -> None:
+    now = datetime.now(timezone.utc)
+    db.execute(
+        text(
+            """
+            DELETE FROM voice_polls
+            WHERE closes_at IS NOT NULL
+              AND closes_at <= :now
+            """
+        ),
+        {"now": now},
+    )
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +259,24 @@ def set_stance(
     else:
         db.add(VoiceStance(issue_id=issue_id, user_id=body.user_id, stance=body.stance))
         setattr(issue, f"{body.stance}_count", getattr(issue, f"{body.stance}_count") + 1)
+
+    try:
+        if issue.created_by_user_id is not None and int(issue.created_by_user_id) != int(body.user_id):
+            create_notification(
+                db,
+                recipient_user_id=int(issue.created_by_user_id),
+                actor_user_id=int(body.user_id),
+                notification_type="voice_vote",
+                entity_type="voice_issue",
+                entity_id=int(issue_id),
+                payload={
+                    "kind": "voice_vote",
+                    "issue_id": int(issue_id),
+                    "stance": body.stance,
+                },
+            )
+    except Exception:
+        pass
 
     db.commit()
     db.refresh(issue)
@@ -573,9 +607,12 @@ def get_active_poll(
     viewer_user_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> VoicePollOut:
+    _delete_expired_polls(db)
+
     poll = db.execute(
         select(VoicePoll)
         .where(VoicePoll.is_active.is_(True))
+        .where((VoicePoll.closes_at.is_(None)) | (VoicePoll.closes_at > datetime.now(timezone.utc)))
         .order_by(VoicePoll.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -615,8 +652,15 @@ def vote_poll(
     body: VoicePollVoteIn,
     db: Session = Depends(get_db),
 ) -> VoicePollVoteOut:
+    _delete_expired_polls(db)
+
     poll = db.get(VoicePoll, poll_id)
     if not poll or not poll.is_active:
+        raise HTTPException(status_code=404, detail="Poll not found or not active")
+
+    if poll.closes_at is not None and poll.closes_at <= datetime.now(timezone.utc):
+        db.delete(poll)
+        db.commit()
         raise HTTPException(status_code=404, detail="Poll not found or not active")
 
     option = db.get(VoicePollOption, body.option_id)

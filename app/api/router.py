@@ -4,8 +4,11 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.characters import router as characters_router
 from app.api.routes.comics import router as comics_router
 from app.api.routes.health import router as health_router
+from app.api.routes.messages import router as messages_router
+from app.api.routes.notifications import router as notifications_router
 from app.api.routes.posts import router as posts_router
 from app.api.routes.series import router as series_router
+from app.api.routes.sponsored_campaigns import router as sponsored_campaigns_router
 from app.api.routes.topics import router as topics_router
 from app.api.routes.upload import router as upload_router
 from app.api.routes.users import router as users_router
@@ -18,7 +21,10 @@ api_router.include_router(auth_router)
 api_router.include_router(topics_router)
 api_router.include_router(characters_router)
 api_router.include_router(posts_router)
+api_router.include_router(sponsored_campaigns_router)
 api_router.include_router(series_router)
 api_router.include_router(users_router)
 api_router.include_router(upload_router)
 api_router.include_router(voice_router)
+api_router.include_router(messages_router)
+api_router.include_router(notifications_router)

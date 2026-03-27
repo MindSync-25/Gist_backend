@@ -101,7 +101,12 @@ class ForgotPasswordResetIn(BaseModel):
 
 class SocialSignInIn(BaseModel):
     provider: str = Field(pattern="^(google|apple)$")
-    id_token: str = Field(min_length=20)
+    # id_token flow (iOS, Apple, existing flows)
+    id_token: str | None = Field(default=None, min_length=20)
+    # Google Android authorization code flow
+    code: str | None = Field(default=None, min_length=10)
+    redirect_uri: str | None = Field(default=None)
+    code_verifier: str | None = Field(default=None)
     email: str | None = Field(default=None, min_length=5, max_length=255)
     display_name: str | None = Field(default=None, min_length=2, max_length=80)
 

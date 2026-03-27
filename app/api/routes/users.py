@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
 from app.core.database import get_db
+from app.core.notifications import create_notification
+from app.api.deps import get_current_user
 from app.models.follow import Follow
 from app.models.user import User
 from app.schemas.user import FollowOut, PublicUserOut
@@ -111,6 +114,22 @@ def toggle_follow(
 
     follow = Follow(follower_user_id=follower_user_id, followed_user_id=user_id)
     db.add(follow)
+    try:
+        create_notification(
+            db,
+            recipient_user_id=user_id,
+            actor_user_id=follower_user_id,
+            notification_type="follow",
+            entity_type="user",
+            entity_id=user_id,
+            payload={
+                "kind": "new_follower",
+                "follower_user_id": int(follower_user_id),
+                "followed_user_id": int(user_id),
+            },
+        )
+    except Exception:
+        pass
     db.commit()
     return FollowOut(follower_user_id=follower_user_id, followed_user_id=user_id, following=True)
 
@@ -161,3 +180,36 @@ def list_following(
     ).scalars().all()
 
     return [_build_public_user_out(u, db, viewer_user_id) for u in rows]
+
+
+class PushTokenIn(BaseModel):
+    token: str
+
+    @field_validator("token")
+    @classmethod
+    def validate_expo_token(cls, v: str) -> str:
+        v = v.strip()
+        if not v.startswith("ExponentPushToken["):
+            raise ValueError("Must be a valid ExponentPushToken")
+        return v
+
+
+@router.put("/me/push-token", status_code=204)
+def upsert_push_token(
+    body: PushTokenIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Save or update the caller's Expo push token."""
+    current_user.expo_push_token = body.token
+    db.commit()
+
+
+@router.delete("/me/push-token", status_code=204)
+def delete_push_token(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Clear push token on logout."""
+    current_user.expo_push_token = None
+    db.commit()
