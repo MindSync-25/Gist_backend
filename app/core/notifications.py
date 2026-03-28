@@ -8,9 +8,13 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+
 logger = logging.getLogger(__name__)
 
 EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+
+_firebase_app = None
 
 _NOTIF_TYPE_TITLES: dict[str, str] = {
     "post_reaction": "New reaction",
@@ -115,6 +119,82 @@ def send_expo_push(
         return {"ok": False, "reason": "request_failed", "error": str(exc)}
 
 
+def _init_firebase_app() -> tuple[object | None, str | None]:
+    global _firebase_app
+    if _firebase_app is not None:
+        return _firebase_app, None
+
+    settings = get_settings()
+    try:
+        import firebase_admin
+        from firebase_admin import credentials
+    except Exception as exc:  # noqa: BLE001
+        return None, f"firebase_admin_import_failed: {exc}"
+
+    try:
+        cred_obj = None
+        if settings.fcm_service_account_json.strip():
+            data = json.loads(settings.fcm_service_account_json)
+            cred_obj = credentials.Certificate(data)
+        elif settings.fcm_service_account_json_path.strip():
+            cred_obj = credentials.Certificate(settings.fcm_service_account_json_path)
+
+        if cred_obj is None:
+            return None, "missing_fcm_service_account"
+
+        options = {"projectId": settings.fcm_project_id} if settings.fcm_project_id.strip() else None
+        _firebase_app = firebase_admin.initialize_app(cred_obj, options=options)
+        return _firebase_app, None
+    except ValueError as exc:
+        # Only treat this branch as "already initialized" when the SDK says so.
+        # Other ValueError cases indicate malformed credential/options and should surface.
+        if "already exists" in str(exc).lower():
+            try:
+                import firebase_admin
+
+                _firebase_app = firebase_admin.get_app()
+                return _firebase_app, None
+            except Exception as get_app_exc:  # noqa: BLE001
+                return None, f"firebase_get_app_failed: {get_app_exc}"
+        return None, f"firebase_init_failed: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"firebase_init_failed: {exc}"
+
+
+def send_fcm_push(
+    push_token: str,
+    notification_type: str,
+    actor_display_name: str | None,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if not push_token or len(push_token.strip()) < 20:
+        return {"ok": False, "reason": "invalid_fcm_token_format"}
+
+    app, init_error = _init_firebase_app()
+    if app is None:
+        return {"ok": False, "reason": init_error or "firebase_not_initialized"}
+
+    title, body = _build_push_body(notification_type, actor_display_name, payload)
+    try:
+        from firebase_admin import messaging
+
+        # Send a visible notification and include custom payload for deep-linking.
+        message = messaging.Message(
+            token=push_token,
+            notification=messaging.Notification(title=title, body=body),
+            data={"type": notification_type, **{k: str(v) for k, v in payload.items()}},
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(channel_id="default", sound="default"),
+            ),
+        )
+        message_id = messaging.send(message, app=app)
+        return {"ok": True, "message_id": message_id}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("FCM push failed for token %s: %s", push_token[:16], exc)
+        return {"ok": False, "reason": "request_failed", "error": str(exc)}
+
+
 def _send_expo_push(
     push_token: str,
     notification_type: str,
@@ -123,6 +203,16 @@ def _send_expo_push(
 ) -> None:
     """Fire-and-forget wrapper around send_expo_push."""
     send_expo_push(push_token, notification_type, actor_display_name, payload)
+
+
+def _send_fcm_push(
+    push_token: str,
+    notification_type: str,
+    actor_display_name: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Fire-and-forget wrapper around send_fcm_push."""
+    send_fcm_push(push_token, notification_type, actor_display_name, payload)
 
 
 FOLLOWING_POST_DAILY_CAP = 5
@@ -188,10 +278,10 @@ def create_notification(
     # Look up the recipient's Expo push token and fire a push if present.
     try:
         row = db.execute(
-            text("SELECT expo_push_token, display_name FROM users WHERE id = :uid"),
+            text("SELECT expo_push_token, fcm_push_token, display_name FROM users WHERE id = :uid"),
             {"uid": int(recipient_user_id)},
         ).one_or_none()
-        if row and row.expo_push_token:
+        if row and (row.fcm_push_token or row.expo_push_token):
             # Resolve actor name for the push body.
             actor_name: str | None = None
             if actor_user_id:
@@ -201,7 +291,10 @@ def create_notification(
                 ).one_or_none()
                 if actor_row:
                     actor_name = actor_row.display_name
-            _send_expo_push(row.expo_push_token, notification_type, actor_name, body)
+            if row.fcm_push_token:
+                _send_fcm_push(row.fcm_push_token, notification_type, actor_name, body)
+            elif row.expo_push_token:
+                _send_expo_push(row.expo_push_token, notification_type, actor_name, body)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Push lookup failed for user %s: %s", recipient_user_id, exc)
 

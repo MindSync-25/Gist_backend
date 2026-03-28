@@ -1,11 +1,13 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
 from app.core.database import get_db
-from app.core.notifications import create_notification, send_expo_push
+from app.core.notifications import create_notification, send_expo_push, send_fcm_push
 from app.api.deps import get_current_user
 from app.models.follow import Follow
 from app.models.user import User
@@ -184,14 +186,26 @@ def list_following(
 
 class PushTokenIn(BaseModel):
     token: str
+    provider: Literal["expo", "fcm"] = "expo"
 
     @field_validator("token")
     @classmethod
-    def validate_expo_token(cls, v: str) -> str:
+    def validate_non_empty_token(cls, v: str) -> str:
         v = v.strip()
-        if not (v.startswith("ExponentPushToken[") or v.startswith("ExpoPushToken[")):
-            raise ValueError("Must be a valid Expo push token")
+        if not v:
+            raise ValueError("Token is required")
         return v
+
+    @model_validator(mode="after")
+    def validate_provider_token_pair(self):
+        token = self.token.strip()
+        if self.provider == "expo":
+            if not (token.startswith("ExponentPushToken[") or token.startswith("ExpoPushToken[")):
+                raise ValueError("Must be a valid Expo push token")
+        elif self.provider == "fcm":
+            if len(token) < 20:
+                raise ValueError("Must be a valid FCM token")
+        return self
 
 
 class PushTestIn(BaseModel):
@@ -204,8 +218,12 @@ def upsert_push_token(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    """Save or update the caller's Expo push token."""
-    current_user.expo_push_token = body.token
+    """Save or update the caller's push token (FCM or Expo)."""
+    if body.provider == "fcm":
+        current_user.fcm_push_token = body.token
+        # Keep Expo token optional as fallback during migration.
+    else:
+        current_user.expo_push_token = body.token
     db.commit()
 
 
@@ -214,8 +232,9 @@ def delete_push_token(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    """Clear push token on logout."""
+    """Clear push tokens on logout."""
     current_user.expo_push_token = None
+    current_user.fcm_push_token = None
     db.commit()
 
 
@@ -225,18 +244,30 @@ def test_push_token_delivery(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
     """Send a direct test push to the currently saved token for this user."""
-    token = (current_user.expo_push_token or "").strip()
+    fcm_token = (current_user.fcm_push_token or "").strip()
+    expo_token = (current_user.expo_push_token or "").strip()
+    token = fcm_token or expo_token
     if not token:
-        raise HTTPException(status_code=400, detail="No Expo push token saved for this user")
+        raise HTTPException(status_code=400, detail="No push token saved for this user")
 
-    result = send_expo_push(
-        token,
-        notification_type="system",
-        actor_display_name=current_user.display_name,
-        payload={"message": body.body},
-    )
+    provider = "fcm" if fcm_token else "expo"
+    if provider == "fcm":
+        result = send_fcm_push(
+            token,
+            notification_type="system",
+            actor_display_name=current_user.display_name,
+            payload={"message": body.body},
+        )
+    else:
+        result = send_expo_push(
+            token,
+            notification_type="system",
+            actor_display_name=current_user.display_name,
+            payload={"message": body.body},
+        )
     return {
         "ok": bool(result.get("ok")),
+        "provider": provider,
         "token_prefix": token[:20],
         "result": result,
     }

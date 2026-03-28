@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     s3_presign_expiry_seconds: int = 300  # 5 min to complete upload
     s3_content_presign_expiry_seconds: int = 86400  # 24 hr for serving feed images
 
+    # Push notifications (direct FCM)
+    fcm_service_account_json_path: str = ""
+    fcm_service_account_json: str = ""
+    fcm_project_id: str = ""
+
     @property
     def database_url(self) -> str:
         if self.database_url_override:

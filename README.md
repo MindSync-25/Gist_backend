@@ -56,6 +56,16 @@ Then apply schema to AWS Postgres (from local machine with `psql`):
 - `POST /api/v1/posts/{post_id}/comments` create comment
 - `POST /api/v1/posts/{post_id}/reactions` upsert user reaction
 
+## FCM Setup (Backend)
+- Required env/secrets:
+	- `FCM_PROJECT_ID` = Firebase Project ID (for this project: `gist-3296b`)
+	- `FCM_SERVICE_ACCOUNT_JSON` or `FCM_SERVICE_ACCOUNT_JSON_PATH`
+- Get the server credential from Firebase Console:
+	- Project settings -> Service accounts -> Generate new private key
+- Important:
+	- `google-services.json` is Android client config and must not be used as backend Admin credential.
+	- Never commit service-account keys to git.
+
 ## Notes
 - This is a production-oriented starter skeleton.
 - Next modules to add: shares/bookmarks, voice APIs, series APIs, message APIs, rate limiting, caching.
