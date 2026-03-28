@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
 from app.core.database import get_db
-from app.core.notifications import create_notification
+from app.core.notifications import create_notification, send_expo_push
 from app.api.deps import get_current_user
 from app.models.follow import Follow
 from app.models.user import User
@@ -189,9 +189,13 @@ class PushTokenIn(BaseModel):
     @classmethod
     def validate_expo_token(cls, v: str) -> str:
         v = v.strip()
-        if not v.startswith("ExponentPushToken["):
-            raise ValueError("Must be a valid ExponentPushToken")
+        if not (v.startswith("ExponentPushToken[") or v.startswith("ExpoPushToken[")):
+            raise ValueError("Must be a valid Expo push token")
         return v
+
+
+class PushTestIn(BaseModel):
+    body: str = "This is a test push from Gist"
 
 
 @router.put("/me/push-token", status_code=204)
@@ -213,3 +217,26 @@ def delete_push_token(
     """Clear push token on logout."""
     current_user.expo_push_token = None
     db.commit()
+
+
+@router.post("/me/push-token/test")
+def test_push_token_delivery(
+    body: PushTestIn,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    """Send a direct test push to the currently saved token for this user."""
+    token = (current_user.expo_push_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="No Expo push token saved for this user")
+
+    result = send_expo_push(
+        token,
+        notification_type="system",
+        actor_display_name=current_user.display_name,
+        payload={"message": body.body},
+    )
+    return {
+        "ok": bool(result.get("ok")),
+        "token_prefix": token[:20],
+        "result": result,
+    }

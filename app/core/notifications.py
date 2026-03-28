@@ -48,15 +48,17 @@ def _build_push_body(
     return title, bodies.get(notification_type, "You have a new notification")
 
 
-def _send_expo_push(
+def send_expo_push(
     push_token: str,
     notification_type: str,
     actor_display_name: str | None,
     payload: dict[str, Any],
-) -> None:
-    """Fire-and-forget Expo push. Errors are logged but never raised."""
-    if not push_token or not push_token.startswith("ExponentPushToken["):
-        return
+) -> dict[str, Any]:
+    """Send an Expo push and return parsed delivery metadata."""
+    if not push_token or not (
+        push_token.startswith("ExponentPushToken[") or push_token.startswith("ExpoPushToken[")
+    ):
+        return {"ok": False, "reason": "invalid_push_token_format"}
 
     title, body = _build_push_body(notification_type, actor_display_name, payload)
     try:
@@ -73,8 +75,54 @@ def _send_expo_push(
             timeout=8,
         )
         resp.raise_for_status()
+        parsed: dict[str, Any] = {}
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+
+        # Expo returns HTTP 200 even for many delivery errors; inspect ticket status.
+        ticket = None
+        status = None
+        details = None
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        if isinstance(data, list) and data:
+            ticket = data[0]
+        elif isinstance(data, dict):
+            ticket = data
+
+        if isinstance(ticket, dict):
+            status = ticket.get("status")
+            details = ticket.get("details")
+
+        ok = status == "ok"
+        if not ok:
+            logger.warning(
+                "Expo push ticket not ok for token %s: status=%s details=%s body=%s",
+                push_token,
+                status,
+                details,
+                parsed,
+            )
+        return {
+            "ok": ok,
+            "status": status,
+            "details": details,
+            "response": parsed,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("Expo push failed for token %s: %s", push_token, exc)
+        return {"ok": False, "reason": "request_failed", "error": str(exc)}
+
+
+def _send_expo_push(
+    push_token: str,
+    notification_type: str,
+    actor_display_name: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """Fire-and-forget wrapper around send_expo_push."""
+    send_expo_push(push_token, notification_type, actor_display_name, payload)
 
 
 FOLLOWING_POST_DAILY_CAP = 5
