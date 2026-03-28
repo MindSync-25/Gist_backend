@@ -602,48 +602,49 @@ def delete_take(
 # Polls
 # ---------------------------------------------------------------------------
 
-@router.get("/polls/active", response_model=VoicePollOut)
-def get_active_poll(
+@router.get("/polls/active", response_model=list[VoicePollOut])
+def get_active_polls(
     viewer_user_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
-) -> VoicePollOut:
+) -> list[VoicePollOut]:
     _delete_expired_polls(db)
 
-    poll = db.execute(
+    polls = db.execute(
         select(VoicePoll)
         .where(VoicePoll.is_active.is_(True))
         .where((VoicePoll.closes_at.is_(None)) | (VoicePoll.closes_at > datetime.now(timezone.utc)))
         .order_by(VoicePoll.created_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-
-    if not poll:
-        raise HTTPException(status_code=404, detail="No active poll")
-
-    options = db.execute(
-        select(VoicePollOption)
-        .where(VoicePollOption.poll_id == poll.id)
-        .order_by(VoicePollOption.sort_order.asc())
+        .limit(3)
     ).scalars().all()
 
-    viewer_voted: int | None = None
-    if viewer_user_id:
-        row = db.execute(
-            select(VoicePollVote.option_id)
-            .where(VoicePollVote.poll_id == poll.id, VoicePollVote.user_id == viewer_user_id)
-        ).scalar_one_or_none()
-        viewer_voted = row
+    result: list[VoicePollOut] = []
+    for poll in polls:
+        options = db.execute(
+            select(VoicePollOption)
+            .where(VoicePollOption.poll_id == poll.id)
+            .order_by(VoicePollOption.sort_order.asc())
+        ).scalars().all()
 
-    return VoicePollOut(
-        id=poll.id,
-        label=poll.label,
-        question=poll.question,
-        options=_poll_options_with_pct(list(options), poll.total_votes),
-        total_votes=poll.total_votes,
-        closes_at=poll.closes_at,
-        time_info=_format_time_info(poll.closes_at),
-        viewer_voted_option_id=viewer_voted,
-    )
+        viewer_voted: int | None = None
+        if viewer_user_id:
+            row = db.execute(
+                select(VoicePollVote.option_id)
+                .where(VoicePollVote.poll_id == poll.id, VoicePollVote.user_id == viewer_user_id)
+            ).scalar_one_or_none()
+            viewer_voted = row
+
+        result.append(VoicePollOut(
+            id=poll.id,
+            label=poll.label,
+            question=poll.question,
+            options=_poll_options_with_pct(list(options), poll.total_votes),
+            total_votes=poll.total_votes,
+            closes_at=poll.closes_at,
+            time_info=_format_time_info(poll.closes_at),
+            viewer_voted_option_id=viewer_voted,
+        ))
+
+    return result
 
 
 @router.post("/polls/{poll_id}/vote", response_model=VoicePollVoteOut)
@@ -707,6 +708,19 @@ def create_poll(
     body: VoicePollCreateIn,
     db: Session = Depends(get_db),
 ) -> VoicePollOut:
+    # Enforce 3-poll maximum
+    _delete_expired_polls(db)
+    active_count = db.execute(
+        select(func.count()).select_from(VoicePoll)
+        .where(VoicePoll.is_active.is_(True))
+        .where((VoicePoll.closes_at.is_(None)) | (VoicePoll.closes_at > datetime.now(timezone.utc)))
+    ).scalar_one()
+    if active_count >= 3:
+        raise HTTPException(
+            status_code=409,
+            detail="Poll limit reached. You already have 3 active polls. Wait for one to expire before creating a new one.",
+        )
+
     closes_at = datetime.now(timezone.utc) + timedelta(hours=body.closes_in_hours)
 
     poll = VoicePoll(

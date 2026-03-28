@@ -46,8 +46,10 @@ def ensure_runtime_schema() -> None:
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS location VARCHAR(120)"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS language VARCHAR(10) NOT NULL DEFAULT 'en'"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS date_of_birth DATE"))
+        conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS expo_push_token TEXT"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255)"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS apple_sub VARCHAR(255)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_expo_push_token ON users (expo_push_token) WHERE expo_push_token IS NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_google_sub ON users (google_sub) WHERE google_sub IS NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_apple_sub ON users (apple_sub) WHERE apple_sub IS NOT NULL"))
 
@@ -107,6 +109,31 @@ def ensure_runtime_schema() -> None:
         )
         conn.execute(text("ALTER TABLE IF EXISTS voice_issues ALTER COLUMN slug SET NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_voice_issues_slug ON voice_issues (slug)"))
+
+        # Old schema used status='active'; new model expects status='open'/'closed'/'archived'.
+        # Migrate existing rows and replace the check constraint.
+        conn.execute(text("UPDATE voice_issues SET status = 'open' WHERE status = 'active'"))
+        conn.execute(text("ALTER TABLE voice_issues DROP CONSTRAINT IF EXISTS voice_issues_status_check"))
+        conn.execute(text("""
+            DO $$
+            DECLARE
+                cname text;
+            BEGIN
+                SELECT conname INTO cname
+                FROM pg_constraint
+                WHERE conrelid = 'voice_issues'::regclass
+                  AND contype = 'c'
+                  AND conname NOT IN ('ck_voice_issues_created_by_type', 'voice_issues_status_check');
+                IF cname IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE voice_issues DROP CONSTRAINT ' || quote_ident(cname);
+                END IF;
+            END $$
+        """))
+        conn.execute(text("""
+            ALTER TABLE voice_issues
+                ADD CONSTRAINT voice_issues_status_check
+                CHECK (status IN ('open', 'closed', 'archived'))
+        """))
 
         conn.execute(
             text(

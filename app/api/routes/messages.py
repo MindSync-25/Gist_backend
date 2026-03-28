@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.notifications import create_notification
+from app.core.security import decode_access_token
 from app.models.user import User
 from app.schemas.message import (
     ConversationCreateDirectIn,
@@ -24,6 +25,34 @@ from app.schemas.message import (
 )
 
 router = APIRouter(prefix="/messages", tags=["messages"])
+
+
+# ---------------------------------------------------------------------------
+# WebSocket connection manager — keyed by conversation_id
+# ---------------------------------------------------------------------------
+
+class _ConnectionManager:
+    def __init__(self) -> None:
+        self._active: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, conversation_id: str, ws: WebSocket) -> None:
+        await ws.accept()
+        self._active.setdefault(conversation_id, []).append(ws)
+
+    def disconnect(self, conversation_id: str, ws: WebSocket) -> None:
+        conns = self._active.get(conversation_id, [])
+        if ws in conns:
+            conns.remove(ws)
+
+    async def broadcast(self, conversation_id: str, data: dict) -> None:
+        for ws in list(self._active.get(conversation_id, [])):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                pass
+
+
+_manager = _ConnectionManager()
 
 _TABLE_READY = False
 
@@ -326,7 +355,7 @@ def list_messages(
 
 
 @router.post("/conversations/{conversation_id}/messages", response_model=MessageOut)
-def send_message(
+async def send_message(
     conversation_id: str,
     payload: MessageCreateIn,
     db: Session = Depends(get_db),
@@ -442,7 +471,7 @@ def send_message(
         if wrote_notifications:
             db.rollback()
 
-    return MessageOut(
+    out = MessageOut(
         id=message_id,
         conversation_id=conversation_id,
         sender_user_id=current_user.id,
@@ -453,6 +482,11 @@ def send_message(
         shared_post_id=payload.shared_post_id,
         created_at=now,
     )
+
+    # Broadcast to all WebSocket listeners in this conversation instantly.
+    await _manager.broadcast(conversation_id, out.model_dump())
+
+    return out
 
 
 @router.delete("/conversations/{conversation_id}/messages/{message_id}", response_model=MessageDeleteOut)
@@ -574,3 +608,52 @@ def delete_message(
         )
 
     return MessageDeleteOut(ok=True, conversation_id=conversation_id, message_id=message_id)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket — real-time message delivery
+# ---------------------------------------------------------------------------
+
+@router.websocket("/conversations/{conversation_id}/ws")
+async def ws_conversation(
+    websocket: WebSocket,
+    conversation_id: str,
+    token: str = Query(...),
+    db: Session = Depends(get_db),
+) -> None:
+    """
+    Connect to receive real-time messages for a conversation.
+    Authenticate via ?token=<jwt>. Stays open until client disconnects.
+    Clients should send any text periodically as a keep-alive ping.
+    """
+    subject = decode_access_token(token)
+    if not subject:
+        await websocket.close(code=4001)
+        return
+
+    try:
+        user_id = int(subject)
+    except ValueError:
+        await websocket.close(code=4001)
+        return
+
+    user = db.get(User, user_id)
+    if user is None or not user.is_active:
+        await websocket.close(code=4001)
+        return
+
+    # Verify user is a participant in this conversation.
+    _ensure_table_exists()
+    member = _table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"}
+    ).get("Item")
+    if member is None:
+        await websocket.close(code=4003)
+        return
+
+    await _manager.connect(conversation_id, websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep-alive / ping frames
+    except WebSocketDisconnect:
+        _manager.disconnect(conversation_id, websocket)
