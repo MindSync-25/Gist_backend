@@ -23,6 +23,7 @@ class Comic(Base):
     background: Mapped[str | None] = mapped_column(Text, nullable=True)
     dialogue: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     image_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    localized_copy: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     s3_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     s3_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, server_default=func.now())

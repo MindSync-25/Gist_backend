@@ -5,6 +5,7 @@ from app.api.routes.characters import router as characters_router
 from app.api.routes.comics import router as comics_router
 from app.api.routes.health import router as health_router
 from app.api.routes.messages import router as messages_router
+from app.api.routes.moderation import router as moderation_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.posts import router as posts_router
 from app.api.routes.series import router as series_router
@@ -28,3 +29,4 @@ api_router.include_router(upload_router)
 api_router.include_router(voice_router)
 api_router.include_router(messages_router)
 api_router.include_router(notifications_router)
+api_router.include_router(moderation_router)

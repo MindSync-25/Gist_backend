@@ -8,6 +8,9 @@ primary_region = 'bom'
 
 [build]
 
+[deploy]
+  release_command = "python run_migration_fly.py"
+
 [env]
   APP_ENV = 'production'
   DB_USE_PGBOUNCER = 'true'

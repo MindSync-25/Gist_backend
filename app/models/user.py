@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, String, Text, func
+from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -30,3 +30,6 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expo_push_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     fcm_push_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preferred_topic_slugs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list, server_default="{}")
+    preferred_languages: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=lambda: ["en"], server_default="{en}")
+    onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")

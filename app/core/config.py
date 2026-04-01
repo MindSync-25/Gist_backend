@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     fcm_service_account_json: str = ""
     fcm_project_id: str = ""
 
+    # Comma-separated phrases for comment pre-submit moderation checks.
+    comment_moderation_blocklist: str = ""
+
     @property
     def database_url(self) -> str:
         if self.database_url_override:

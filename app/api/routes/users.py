@@ -1,8 +1,8 @@
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import func, select
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
@@ -130,6 +130,25 @@ def toggle_follow(
                 "followed_user_id": int(user_id),
             },
         )
+    except Exception:
+        pass
+    # Follower milestone check
+    try:
+        db.flush()  # ensure the new Follow row is visible within the transaction
+        follower_count = int(db.execute(
+            text("SELECT COUNT(*) FROM follows WHERE followed_user_id = :uid"),
+            {"uid": int(user_id)},
+        ).scalar_one())
+        if follower_count in {10, 50, 100, 500, 1000}:
+            create_notification(
+                db,
+                recipient_user_id=int(user_id),
+                actor_user_id=None,
+                notification_type="follower_milestone",
+                entity_type="user",
+                entity_id=int(user_id),
+                payload={"kind": "follower_milestone", "count": follower_count},
+            )
     except Exception:
         pass
     db.commit()
@@ -271,3 +290,48 @@ def test_push_token_delivery(
         "token_prefix": token[:20],
         "result": result,
     }
+
+
+# ---------------------------------------------------------------------------
+# Onboarding
+# ---------------------------------------------------------------------------
+
+_VALID_TOPIC_SLUGS = {"politics", "sports", "business", "tech", "entertainment", "finance"}
+_VALID_LANGUAGE_CODES = {"en", "hi", "kn", "te", "ta"}
+
+
+class OnboardingIn(BaseModel):
+    topic_slugs: list[str] = Field(min_length=3, max_length=6)
+    languages: list[str] = Field(min_length=1, max_length=3)
+
+    @field_validator("topic_slugs")
+    @classmethod
+    def validate_topics(cls, v: list[str]) -> list[str]:
+        invalid = set(v) - _VALID_TOPIC_SLUGS
+        if invalid:
+            raise ValueError(f"Unknown topic slugs: {invalid}")
+        if len(v) < 3:
+            raise ValueError("Select at least 3 topics")
+        return list(dict.fromkeys(v))  # deduplicate, preserve order
+
+    @field_validator("languages")
+    @classmethod
+    def validate_languages(cls, v: list[str]) -> list[str]:
+        invalid = set(v) - _VALID_LANGUAGE_CODES
+        if invalid:
+            raise ValueError(f"Unknown language codes: {invalid}")
+        result = ["en"] + [lang for lang in v if lang != "en"]  # ensure en is first
+        return list(dict.fromkeys(result))[:3]  # max 3
+
+
+@router.post("/me/onboarding", status_code=204)
+def complete_onboarding(
+    body: OnboardingIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Save topic interests and language preferences, mark onboarding done."""
+    current_user.preferred_topic_slugs = body.topic_slugs
+    current_user.preferred_languages = body.languages
+    current_user.onboarding_completed = True
+    db.commit()

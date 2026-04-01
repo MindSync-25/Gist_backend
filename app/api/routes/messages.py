@@ -15,6 +15,7 @@ from app.core.database import get_db
 from app.core.notifications import create_notification
 from app.core.security import decode_access_token
 from app.models.user import User
+from app.models.user_block import UserBlock
 from app.schemas.message import (
     ConversationCreateDirectIn,
     ConversationOut,
@@ -188,6 +189,17 @@ def _get_users_map(db: Session, user_ids: list[int]) -> dict[int, User]:
     return {u.id: u for u in users}
 
 
+def _ensure_not_blocked_between(db: Session, user_a: int, user_b: int) -> None:
+    blocked = db.execute(
+        select(UserBlock).where(
+            ((UserBlock.blocker_user_id == user_a) & (UserBlock.blocked_user_id == user_b))
+            | ((UserBlock.blocker_user_id == user_b) & (UserBlock.blocked_user_id == user_a))
+        )
+    ).scalar_one_or_none()
+    if blocked is not None:
+        raise HTTPException(status_code=403, detail="Messaging unavailable due to block settings")
+
+
 def _build_participants(participant_ids: list[int], users_by_id: dict[int, User]) -> list[ConversationParticipantOut]:
     out: list[ConversationParticipantOut] = []
     for uid in participant_ids:
@@ -215,6 +227,8 @@ def create_or_get_direct_conversation(
     other_user = db.get(User, payload.other_user_id)
     if other_user is None or not other_user.is_active:
         raise HTTPException(status_code=404, detail="Recipient user not found")
+
+    _ensure_not_blocked_between(db, current_user.id, payload.other_user_id)
 
     _ensure_table_exists()
     conversation_id = _direct_conversation_id(current_user.id, payload.other_user_id)
@@ -376,6 +390,15 @@ async def send_message(
     if payload.message_type == "post_share" and payload.shared_post_id is None:
         raise HTTPException(status_code=400, detail="shared_post_id is required for shared post messages")
 
+    meta = t.get_item(Key={"PK": f"CONV#{conversation_id}", "SK": "META"}).get("Item")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participant_ids = [int(v) for v in meta.get("participant_user_ids", [])]
+    if len(participant_ids) == 2:
+        other_user_id = participant_ids[0] if participant_ids[1] == int(current_user.id) else participant_ids[1]
+        _ensure_not_blocked_between(db, int(current_user.id), int(other_user_id))
+
     now = _iso_now()
     message_id = str(uuid4())
     body = payload.body.strip() if payload.body else None
@@ -396,11 +419,6 @@ async def send_message(
         }
     )
 
-    meta = t.get_item(Key={"PK": f"CONV#{conversation_id}", "SK": "META"}).get("Item")
-    if meta is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    participant_ids = [int(v) for v in meta.get("participant_user_ids", [])]
     t.update_item(
         Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
         UpdateExpression="SET last_message_at=:lma, last_message_preview=:lmp, updated_at=:upd",

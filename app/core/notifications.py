@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from typing import Any
 
 import httpx
@@ -26,6 +27,10 @@ _NOTIF_TYPE_TITLES: dict[str, str] = {
     "message": "New message",
     "series_update": "Series update",
     "system": "Gist",
+    "post_bookmarked": "Post saved",
+    "mention": "You were mentioned",
+    "follower_milestone": "Milestone reached",
+    "voice_milestone": "Your voice is trending",
 }
 
 
@@ -48,6 +53,10 @@ def _build_push_body(
         "message": f"{actor} sent you a message",
         "series_update": payload.get("title", "A series you follow was updated"),  # type: ignore[arg-type]
         "system": payload.get("message", "You have a new notification"),  # type: ignore[arg-type]
+        "post_bookmarked": f"{actor} bookmarked your post",
+        "mention": f"{actor} mentioned you in a comment",
+        "follower_milestone": f"You reached {payload.get('count', '')} followers!",
+        "voice_milestone": f"Your voice reached {payload.get('total_votes', '')} votes!",
     }
     return title, bodies.get(notification_type, "You have a new notification")
 
@@ -694,3 +703,135 @@ def fanout_new_post_notifications(
                 post_id=int(post_id),
                 title=title,
             )
+
+
+_HOURLY_DIGEST_TEMPLATES: list[str] = [
+    "{topic}: {title}",
+    "Trending in {topic} — {title}",
+    "Latest from {topic}: {title}",
+    "Don't miss: {title}",
+    "New {topic} story you might like",
+    "Hot in {topic} right now — {title}",
+    "Just in: {title}",
+    "People are talking about this in {topic}",
+    "Top {topic} update: {title}",
+    "Breaking in {topic} — {title}",
+    "Fresh from {topic}: {title}",
+    "Your {topic} roundup: {title}",
+]
+
+
+def send_hourly_interest_digest(db: Session) -> None:
+    """Send one personalised interest-post push to each eligible user once per hour."""
+    try:
+        user_rows = db.execute(
+            text(
+                """
+                SELECT id, preferred_topic_slugs
+                FROM users
+                WHERE onboarding_completed = true
+                  AND preferred_topic_slugs != '{}'::text[]
+                  AND is_active = true
+                  AND (fcm_push_token IS NOT NULL OR expo_push_token IS NOT NULL)
+                """
+            )
+        ).mappings().all()
+
+        for user_row in user_rows:
+            try:
+                user_id = int(user_row["id"])
+                slugs = list(user_row["preferred_topic_slugs"] or [])
+                if not slugs:
+                    continue
+
+                # Skip if an hourly digest was already sent within the last 55 minutes
+                recent = db.execute(
+                    text(
+                        """
+                        SELECT id FROM notifications
+                        WHERE recipient_user_id = :uid
+                          AND notification_type = 'system'
+                          AND payload->>'kind' = 'interest_hourly'
+                          AND created_at >= NOW() - INTERVAL '55 minutes'
+                        LIMIT 1
+                        """
+                    ),
+                    {"uid": user_id},
+                ).first()
+                if recent:
+                    continue
+
+                # Posts already notified about via hourly digest
+                notified_post_ids: set[int] = set(
+                    int(r)
+                    for r in db.execute(
+                        text(
+                            """
+                            SELECT (payload->>'post_id')::int
+                            FROM notifications
+                            WHERE recipient_user_id = :uid
+                              AND notification_type = 'system'
+                              AND payload->>'kind' = 'interest_hourly'
+                              AND payload->>'post_id' IS NOT NULL
+                            """
+                        ),
+                        {"uid": user_id},
+                    ).scalars().all()
+                    if r is not None
+                )
+
+                # Fresh published posts from user's preferred topics (last 48 h)
+                candidates = db.execute(
+                    text(
+                        """
+                                                SELECT p.id, p.title, t.label AS topic_name, p.author_user_id
+                        FROM posts p
+                        JOIN topics t ON t.id = p.topic_id
+                        WHERE t.slug = ANY(:slugs)
+                          AND p.status = 'published'
+                          AND p.published_at >= NOW() - INTERVAL '48 hours'
+                          AND p.author_user_id != :uid
+                        ORDER BY p.published_at DESC
+                        LIMIT 50
+                        """
+                    ),
+                    {"slugs": slugs, "uid": user_id},
+                ).mappings().all()
+
+                fresh = [r for r in candidates if int(r["id"]) not in notified_post_ids]
+                if not fresh:
+                    continue
+
+                pick = random.choice(fresh)
+                post_id = int(pick["id"])
+                topic_name: str = pick["topic_name"] or "your topics"
+                title: str = pick["title"] or "New post"
+                author_uid = pick["author_user_id"]
+
+                tmpl = random.choice(_HOURLY_DIGEST_TEMPLATES)
+                message = tmpl.format(topic=topic_name, title=title[:60])
+
+                create_notification(
+                    db,
+                    recipient_user_id=user_id,
+                    actor_user_id=int(author_uid) if author_uid else None,
+                    notification_type="system",
+                    entity_type="post",
+                    entity_id=post_id,
+                    payload={
+                        "kind": "interest_hourly",
+                        "post_id": post_id,
+                        "topic_name": topic_name,
+                        "title": title,
+                        "message": message,
+                    },
+                )
+
+            except Exception as exc:  # noqa: BLE001
+                db.rollback()
+                logger.warning("Hourly digest skipped for user %s: %s", user_row.get("id"), exc)
+
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Hourly interest digest run failed: %s", exc)

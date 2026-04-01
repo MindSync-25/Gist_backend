@@ -278,6 +278,27 @@ def set_stance(
     except Exception:
         pass
 
+    # Voice trending milestone — only triggered on brand new votes, not stance changes
+    if not existing:
+        try:
+            total_votes = issue.support_count + issue.oppose_count + issue.question_count
+            if total_votes in {10, 50, 100, 500} and issue.created_by_user_id is not None:
+                create_notification(
+                    db,
+                    recipient_user_id=int(issue.created_by_user_id),
+                    actor_user_id=None,
+                    notification_type="voice_milestone",
+                    entity_type="voice_issue",
+                    entity_id=int(issue_id),
+                    payload={
+                        "kind": "voice_milestone",
+                        "issue_id": int(issue_id),
+                        "total_votes": total_votes,
+                    },
+                )
+        except Exception:
+            pass
+
     db.commit()
     db.refresh(issue)
 

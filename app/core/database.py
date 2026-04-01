@@ -43,6 +43,9 @@ def get_db() -> Generator[Session, None, None]:
 def ensure_runtime_schema() -> None:
     """Apply safe runtime schema adjustments for any environment."""
     with engine.begin() as conn:
+        # Avoid blocking app startup on long-held DDL locks in production.
+        conn.execute(text("SET LOCAL lock_timeout = '2s'"))
+        conn.execute(text("SET LOCAL statement_timeout = '10s'"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS location VARCHAR(120)"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS language VARCHAR(10) NOT NULL DEFAULT 'en'"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS date_of_birth DATE"))

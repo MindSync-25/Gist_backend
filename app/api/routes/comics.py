@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from functools import lru_cache
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
+from app.core.comment_moderation import moderate_comment_text
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.notifications import create_notification
@@ -14,12 +16,14 @@ from app.models.comic_comment import ComicComment
 from app.models.comic_comment_reaction import ComicCommentReaction
 from app.models.comic_metric import ComicMetric
 from app.models.comic_reaction import ComicReaction
+from app.models.topic import Topic
 from app.models.user import User
 from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
 from app.schemas.comic import ComicOut
 from app.schemas.post import PostReactionIn, PostReactionOut
 
 router = APIRouter(prefix="/comics", tags=["comics"])
+SUPPORTED_COMIC_LANGUAGES = {"en", "hi", "kn", "ta", "te"}
 
 
 @lru_cache
@@ -65,6 +69,45 @@ def _get_or_create_metrics(db: Session, comic_id: int) -> ComicMetric:
     return metric
 
 
+def _normalize_language_code(language: str | None) -> str:
+    if not language:
+        return "en"
+    code = str(language).strip().lower().split("-")[0]
+    return code if code in SUPPORTED_COMIC_LANGUAGES else "en"
+
+
+def _safe_localized_copy(raw: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    out: dict[str, dict[str, str]] = {}
+    for lang in SUPPORTED_COMIC_LANGUAGES:
+        val = raw.get(lang)
+        if not isinstance(val, dict):
+            continue
+        out[lang] = {
+            "banner_title": str(val.get("banner_title", "")).strip(),
+            "summary": str(val.get("summary", "")).strip(),
+        }
+    return out
+
+
+def _localized_field(
+    localized_copy: dict[str, dict[str, str]],
+    language: str,
+    field: str,
+    fallback: str | None,
+) -> str | None:
+    fallback_text = (fallback or "").strip() or None
+    lang_val = (localized_copy.get(language, {}) or {}).get(field, "").strip()
+    if lang_val:
+        return lang_val
+    en_val = (localized_copy.get("en", {}) or {}).get(field, "").strip()
+    if en_val:
+        return en_val
+    return fallback_text
+
+
 def _map_comment_out(comic_id: int, comment: ComicComment, users_by_id: dict[int, User], liked_by_viewer: bool = False) -> CommentOut:
     author = users_by_id.get(comment.user_id) if comment.user_id is not None else None
     author_avatar_display_url = None
@@ -92,20 +135,113 @@ def _map_comment_out(comic_id: int, comment: ComicComment, users_by_id: dict[int
     )
 
 
+def _category_tokens_for_topic_slug(slug: str) -> set[str]:
+    base = slug.strip().lower()
+    if not base:
+        return set()
+
+    alias_map: dict[str, set[str]] = {
+        "politics": {"politics", "political"},
+        "sports": {"sports", "sport"},
+        "business": {"business", "economy", "economic"},
+        "tech": {"tech", "technology"},
+        "entertainment": {"entertainment", "movies", "movie", "culture"},
+        "finance": {"finance", "financial", "markets", "market"},
+    }
+    return alias_map.get(base, {base})
+
+
+def _viewer_preferred_comic_categories(db: Session, viewer_user_id: int | None) -> set[str]:
+    if viewer_user_id is None:
+        return set()
+
+    viewer = db.get(User, viewer_user_id)
+    if viewer is None:
+        return set()
+
+    topic_slugs = list(dict.fromkeys(viewer.preferred_topic_slugs or []))
+    if not topic_slugs:
+        return set()
+
+    active_topic_slugs = db.execute(
+        select(Topic.slug).where(
+            Topic.slug.in_(topic_slugs),
+            Topic.is_active.is_(True),
+        )
+    ).scalars().all()
+
+    categories: set[str] = set()
+    for slug in active_topic_slugs:
+        categories.update(_category_tokens_for_topic_slug(slug))
+    return categories
+
+
 @router.get("", response_model=list[ComicOut])
 def list_comics(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    language: str = Query(default="en"),
     viewer_user_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
 ) -> list[ComicOut]:
-    rows = db.execute(
-        select(Comic)
-        .where(func.coalesce(Comic.s3_key, "") != "")
-        .order_by(desc(Comic.generated_at), desc(Comic.id))
-        .limit(limit)
-        .offset(offset)
-    ).scalars().all()
+    active_language = _normalize_language_code(language)
+    base_stmt = select(Comic).where(func.coalesce(Comic.s3_key, "") != "")
+
+    preferred_categories = _viewer_preferred_comic_categories(db, viewer_user_id)
+    if not preferred_categories:
+        rows = list(
+            db.execute(
+                base_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(limit).offset(offset)
+            ).scalars().all()
+        )
+    else:
+        # Blend: ~75% preferred categories + ~25% discovery (other categories)
+        need = limit + offset
+        interest_stmt = base_stmt.where(
+            func.lower(func.coalesce(Comic.category, "")).in_(preferred_categories)
+        )
+        interest_comics = list(
+            db.execute(
+                interest_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(need * 2)
+            ).scalars().all()
+        )
+        interest_ids = {c.id for c in interest_comics}
+
+        discovery_stmt = base_stmt.where(
+            func.lower(func.coalesce(Comic.category, "")).notin_(preferred_categories)
+        )
+        if interest_ids:
+            discovery_stmt = discovery_stmt.where(Comic.id.notin_(list(interest_ids)))
+        discovery_size = max(need // 4, 3)
+        discovery_comics = list(
+            db.execute(
+                discovery_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(discovery_size * 2)
+            ).scalars().all()
+        )
+
+        # Interleave: pattern [I, I, I, D] → 75% interest, 25% discovery
+        merged: list = []
+        ii = di = 0
+        pattern = ['I', 'I', 'I', 'D']
+        while len(merged) < need:
+            added = 0
+            for slot in pattern:
+                if len(merged) >= need:
+                    break
+                if slot == 'I':
+                    if ii < len(interest_comics):
+                        merged.append(interest_comics[ii]); ii += 1; added += 1
+                    elif di < len(discovery_comics):
+                        merged.append(discovery_comics[di]); di += 1; added += 1
+                elif slot == 'D':
+                    if di < len(discovery_comics):
+                        merged.append(discovery_comics[di]); di += 1; added += 1
+                    elif ii < len(interest_comics):
+                        merged.append(interest_comics[ii]); ii += 1; added += 1
+            if added == 0:
+                break
+        rows = merged[offset:offset + limit]
+
     comic_ids = [comic.id for comic in rows]
     metrics = db.execute(select(ComicMetric).where(ComicMetric.comic_id.in_(comic_ids))).scalars().all() if comic_ids else []
     metric_by_comic_id = {metric.comic_id: metric for metric in metrics}
@@ -125,6 +261,9 @@ def list_comics(
     result: list[ComicOut] = []
     for comic in rows:
         metric = metric_by_comic_id.get(comic.id)
+        localized_copy = _safe_localized_copy(comic.localized_copy)
+        localized_banner = _localized_field(localized_copy, active_language, "banner_title", comic.banner_title)
+        localized_summary = _localized_field(localized_copy, active_language, "summary", comic.summary)
         result.append(
             ComicOut(
                 id=comic.id,
@@ -134,13 +273,14 @@ def list_comics(
                 category=comic.category,
                 run_date=comic.run_date,
                 tone=comic.tone,
-                summary=comic.summary,
-                banner_title=comic.banner_title,
+                summary=localized_summary,
+                banner_title=localized_banner,
                 scene=comic.scene,
                 hero_character=comic.hero_character,
                 background=comic.background,
                 dialogue=comic.dialogue,
                 image_prompt=comic.image_prompt,
+                localized_copy=localized_copy or None,
                 s3_key=comic.s3_key,
                 s3_url=_fresh_url(comic.s3_key) or comic.s3_url,
                 generated_at=comic.generated_at,
@@ -168,7 +308,7 @@ def list_comic_comments(
         select(ComicComment)
         .where(
             ComicComment.comic_id == comic_id,
-            ComicComment.status != "deleted",
+            ComicComment.status == "published",
         )
         .order_by(ComicComment.created_at.asc(), ComicComment.id.asc())
         .limit(limit)
@@ -211,6 +351,9 @@ def create_comic_comment(
     db: Session = Depends(get_db),
 ) -> CommentOut:
     _ensure_comic_exists(db, comic_id)
+    moderation = moderate_comment_text(payload.body)
+    if not moderation.allowed:
+        raise HTTPException(status_code=422, detail=moderation.reason or "Comment violates moderation guidelines.")
 
     if payload.parent_comment_id is not None:
         parent = db.get(ComicComment, payload.parent_comment_id)

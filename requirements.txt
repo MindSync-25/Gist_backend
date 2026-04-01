@@ -11,3 +11,4 @@ bcrypt==4.0.1
 boto3==1.38.32
 httpx==0.28.1
 firebase-admin==6.5.0
+apscheduler==3.10.4

@@ -17,6 +17,9 @@ class AuthUserOut(BaseModel):
     avatar_display_expires_at: datetime | None = None
     google_connected: bool = False
     apple_connected: bool = False
+    preferred_topic_slugs: list[str] = []
+    preferred_languages: list[str] = ["en"]
+    onboarding_completed: bool = False
 
     model_config = {"from_attributes": True}
 

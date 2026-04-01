@@ -18,6 +18,7 @@ class ComicOut(BaseModel):
     background: str | None = None
     dialogue: dict | list | None = None
     image_prompt: str | None = None
+    localized_copy: dict | None = None
     s3_key: str | None = None
     s3_url: str | None = None
     generated_at: datetime | None = None

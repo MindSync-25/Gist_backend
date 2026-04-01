@@ -592,3 +592,41 @@ def change_password(
     current_user.updated_at = datetime.now(UTC)
     db.commit()
     return {"message": "Password updated successfully"}
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+def delete_me(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> None:
+    """Permanently delete the current user and owned content.
+
+    Messages are intentionally retained for conversation history; sender references
+    are nulled by FK behavior when the user row is deleted.
+    """
+    user_id = int(current_user.id)
+
+    def _delete_if_exists(table_name: str, where_sql: str, params: dict[str, object]) -> None:
+        exists = db.execute(
+            text("SELECT to_regclass(:table_name)"),
+            {"table_name": table_name},
+        ).scalar_one_or_none()
+        if exists:
+            db.execute(text(f"DELETE FROM {table_name} WHERE {where_sql}"), params)
+
+    # Remove user-authored/owned content before deleting the user record.
+    _delete_if_exists("reports", "reporter_user_id = :uid", {"uid": user_id})
+    _delete_if_exists("user_blocks", "blocker_user_id = :uid OR blocked_user_id = :uid", {"uid": user_id})
+    _delete_if_exists("voice_take_replies", "user_id = :uid", {"uid": user_id})
+    _delete_if_exists("voice_takes", "user_id = :uid", {"uid": user_id})
+    _delete_if_exists("comments", "user_id = :uid", {"uid": user_id})
+    _delete_if_exists("comic_comments", "user_id = :uid", {"uid": user_id})
+    _delete_if_exists("posts", "author_user_id = :uid", {"uid": user_id})
+    _delete_if_exists("post_shares", "user_id = :uid", {"uid": user_id})
+
+    # Cleanup auth OTP tables tied to this user/email.
+    _delete_if_exists("auth_password_reset_otps", "user_id = :uid", {"uid": user_id})
+    _delete_if_exists("auth_signup_otps", "email = :email", {"email": current_user.email})
+
+    db.delete(current_user)
+    db.commit()

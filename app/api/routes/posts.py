@@ -1,24 +1,30 @@
+import random
+import re
 from datetime import datetime, timezone
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url, extract_managed_user_upload_key
+from app.core.comment_moderation import moderate_comment_text
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.notifications import create_notification, fanout_new_post_notifications
 from app.api.deps import get_current_user
 from app.models.bookmark import Bookmark
 from app.models.comment import Comment
+from app.models.follow import Follow
 from app.models.comment_reaction import CommentReaction
 from app.models.post import Post
 from app.models.post_metric import PostMetric
 from app.models.post_reaction import PostReaction
 from app.models.post_share import PostShare
+from app.models.topic import Topic
 from app.models.user import User
+from app.models.user_block import UserBlock
 from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
 from app.schemas.post import PostBookmarkIn, PostBookmarkOut, PostCreateIn, PostOut, PostReactionIn, PostReactionOut, PostShareIn, PostShareOut, PostUpdateIn, PostDeleteOut
 
@@ -188,6 +194,205 @@ def _delete_managed_media_from_s3(image_url: str | None, video_url: str | None) 
     _delete_managed_image_from_s3(video_url)
 
 
+def _normalize_language_codes(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    normalized: list[str] = []
+    for value in values:
+        code = value.strip().lower()
+        if code and code not in normalized:
+            normalized.append(code)
+    return normalized
+
+
+def _interleave_feed(
+    followed: list,
+    interests: list,
+    discovery: list,
+    limit: int,
+) -> list:
+    """
+    Merge three post buckets using pattern [I, I, F, I, D] per 5-slot cycle.
+      I = interest topic post   (major share of the feed)
+      F = followed-user post    (always prioritised; falls back to I)
+      D = discovery post        (non-preferred topic for variety; falls back to I)
+    """
+    result: list = []
+    fi = ii = di = 0
+    pattern = ['I', 'I', 'F', 'I', 'D']
+
+    while len(result) < limit:
+        added = 0
+        for slot in pattern:
+            if len(result) >= limit:
+                break
+            if slot == 'F':
+                if fi < len(followed):
+                    result.append(followed[fi]); fi += 1; added += 1
+                elif ii < len(interests):
+                    result.append(interests[ii]); ii += 1; added += 1
+                elif di < len(discovery):
+                    result.append(discovery[di]); di += 1; added += 1
+            elif slot == 'I':
+                if ii < len(interests):
+                    result.append(interests[ii]); ii += 1; added += 1
+                elif fi < len(followed):
+                    result.append(followed[fi]); fi += 1; added += 1
+                elif di < len(discovery):
+                    result.append(discovery[di]); di += 1; added += 1
+            elif slot == 'D':
+                if di < len(discovery):
+                    result.append(discovery[di]); di += 1; added += 1
+                elif ii < len(interests):
+                    result.append(interests[ii]); ii += 1; added += 1
+                elif fi < len(followed):
+                    result.append(followed[fi]); fi += 1; added += 1
+        if added == 0:
+            break
+    return result
+
+
+def _get_blocked_user_ids(db: Session, viewer_user_id: int) -> list[int]:
+    """Return IDs of users blocked by viewer_user_id."""
+    return list(
+        db.execute(
+            select(UserBlock.blocked_user_id)
+            .where(UserBlock.blocker_user_id == viewer_user_id)
+        ).scalars().all()
+    )
+
+
+def _fetch_blended_feed_posts(
+    db: Session,
+    viewer_user_id: int,
+    limit: int,
+    offset: int,
+    blocked_user_ids: list[int] | None = None,
+) -> list[Post]:
+    """
+    Build a personalised, blended post feed:
+      Bucket F – posts from people the viewer follows (always prioritised)
+      Bucket I – posts from the viewer's preferred topics, excluding F
+      Bucket D – discovery: other topics (~20% of page) for variety
+    Falls back to plain recency when the viewer has no follows or preferences.
+    """
+    viewer = db.get(User, viewer_user_id)
+    if viewer is None:
+        return []
+
+    # ---- Who the viewer follows ------------------------------------------
+    followed_user_ids: list[int] = list(
+        db.execute(
+            select(Follow.followed_user_id)
+            .where(Follow.follower_user_id == viewer_user_id)
+        ).scalars().all()
+    )
+
+    # ---- Preferred topic IDs ---------------------------------------------
+    preferred_topic_slugs = list(dict.fromkeys(viewer.preferred_topic_slugs or []))
+    preferred_topic_ids: list[int] = []
+    if preferred_topic_slugs:
+        preferred_topic_ids = list(
+            db.execute(
+                select(Topic.id).where(
+                    Topic.slug.in_(preferred_topic_slugs),
+                    Topic.is_active.is_(True),
+                )
+            ).scalars().all()
+        )
+
+    # Remove blocked users from followed list and preference application
+    if blocked_user_ids:
+        followed_user_ids = [uid for uid in followed_user_ids if uid not in set(blocked_user_ids)]
+
+    block_filter = Post.author_user_id.notin_(blocked_user_ids) if blocked_user_ids else None
+
+    # No personalisation available: plain recency
+    if not followed_user_ids and not preferred_topic_ids:
+        stmt = (
+            select(Post)
+            .where(Post.status == "published")
+            .order_by(Post.published_at.desc(), Post.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        if block_filter is not None:
+            stmt = stmt.where(block_filter)
+        return list(db.execute(stmt).scalars().all())
+
+    need = limit + offset          # total items needed before slicing
+    fetch_size = max(need * 2, 60) # generous pool per bucket
+    base = select(Post).where(Post.status == "published")
+    if blocked_user_ids:
+        base = base.where(Post.author_user_id.notin_(blocked_user_ids))
+
+    # Bucket F: followed-user posts (any topic) ----------------------------
+    followed_posts: list[Post] = []
+    if followed_user_ids:
+        followed_posts = list(
+            db.execute(
+                base
+                .where(Post.author_user_id.in_(followed_user_ids))
+                .order_by(Post.published_at.desc(), Post.id.desc())
+                .limit(fetch_size)
+            ).scalars().all()
+        )
+    followed_ids: set[int] = {p.id for p in followed_posts}
+
+    # Bucket I: preferred-topic posts, excluding F -------------------------
+    interest_posts: list[Post] = []
+    if preferred_topic_ids:
+        iq = base.where(Post.topic_id.in_(preferred_topic_ids))
+        if followed_ids:
+            iq = iq.where(Post.id.notin_(list(followed_ids)))
+        interest_posts = list(
+            db.execute(
+                iq.order_by(Post.published_at.desc(), Post.id.desc()).limit(fetch_size)
+            ).scalars().all()
+        )
+    elif followed_user_ids:
+        # No topic prefs but has follows: fill I with everyone-else's recent posts
+        iq = base.where(Post.author_user_id.notin_(followed_user_ids))
+        interest_posts = list(
+            db.execute(
+                iq.order_by(Post.published_at.desc(), Post.id.desc()).limit(fetch_size)
+            ).scalars().all()
+        )
+
+    # Bucket D: discovery (non-preferred topics, non-followed authors) ------
+    discovery_fetch = max(need // 4, 5)
+    dq = base
+    if preferred_topic_ids:
+        dq = dq.where(
+            or_(Post.topic_id.is_(None), Post.topic_id.notin_(preferred_topic_ids))
+        )
+    if followed_user_ids:
+        dq = dq.where(Post.author_user_id.notin_(followed_user_ids))
+    already_seen = followed_ids | {p.id for p in interest_posts}
+    if already_seen:
+        dq = dq.where(Post.id.notin_(list(already_seen)))
+    discovery_posts = list(
+        db.execute(
+            dq.order_by(Post.published_at.desc(), Post.id.desc()).limit(discovery_fetch * 2)
+        ).scalars().all()
+    )
+
+    # Shuffle the interest pool so topics are mixed (politics/business/finance
+    # appear in random order rather than grouped by topic).
+    random.shuffle(interest_posts)
+    # Shuffle followed-user posts too so one prolific author doesn't dominate.
+    random.shuffle(followed_posts)
+
+    # ---- Interleave and paginate -----------------------------------------
+    merged = _interleave_feed(
+        followed=followed_posts,
+        interests=interest_posts,
+        discovery=discovery_posts,
+        limit=need,
+    )
+    return merged[offset:offset + limit]
+
+
 @router.post("", response_model=PostOut, status_code=201)
 def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut:
     now = datetime.now(timezone.utc)
@@ -255,17 +460,37 @@ def list_posts(
     viewer_user_id: int | None = Query(default=None, ge=1),
     db: Session = Depends(get_db),
 ) -> list[PostOut]:
-    base_query = select(Post).where(Post.status == "published")
+    blocked_user_ids: list[int] = []
+    if viewer_user_id is not None:
+        blocked_user_ids = _get_blocked_user_ids(db, viewer_user_id)
 
     if author_user_id is not None:
-        base_query = base_query.where(Post.author_user_id == author_user_id)
+        if blocked_user_ids and author_user_id in blocked_user_ids:
+            return []
 
-    posts = db.execute(
-        base_query
-        .order_by(Post.published_at.desc(), Post.id.desc())
-        .limit(limit)
-        .offset(offset)
-    ).scalars().all()
+        # Profile view: plain recency for a specific author
+        stmt = (
+            select(Post)
+            .where(Post.status == "published", Post.author_user_id == author_user_id)
+            .order_by(Post.published_at.desc(), Post.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        posts = list(db.execute(stmt).scalars().all())
+    elif viewer_user_id is not None:
+        # Personalised blended feed (blocked filter applied inside helper)
+        posts = _fetch_blended_feed_posts(db, viewer_user_id, limit, offset, blocked_user_ids)
+    else:
+        # Anonymous: plain recency
+        posts = list(
+            db.execute(
+                select(Post)
+                .where(Post.status == "published")
+                .order_by(Post.published_at.desc(), Post.id.desc())
+                .limit(limit)
+                .offset(offset)
+            ).scalars().all()
+        )
 
     if not posts:
         return []
@@ -434,7 +659,7 @@ def list_post_comments(
         select(Comment)
         .where(
             Comment.post_id == post_id,
-            Comment.status != "deleted",
+            Comment.status == "published",
         )
         .order_by(Comment.created_at.asc(), Comment.id.asc())
         .limit(limit)
@@ -483,6 +708,9 @@ def create_comment(
     db: Session = Depends(get_db),
 ) -> CommentOut:
     post = _ensure_post_exists(db, post_id)
+    moderation = moderate_comment_text(payload.body)
+    if not moderation.allowed:
+        raise HTTPException(status_code=422, detail=moderation.reason or "Comment violates moderation guidelines.")
 
     if payload.parent_comment_id is not None:
         parent = db.get(Comment, payload.parent_comment_id)
@@ -546,6 +774,36 @@ def create_comment(
                     "comment_id": int(comment.id),
                 },
             )
+
+        # @mention notifications
+        mentioned_usernames = re.findall(r'@(\w+)', payload.body)
+        if mentioned_usernames:
+            already_notified_ids = {int(payload.user_id)}
+            if post.author_user_id is not None:
+                already_notified_ids.add(int(post.author_user_id))
+            if parent is not None and parent.user_id is not None:
+                already_notified_ids.add(int(parent.user_id))
+            mention_users = db.execute(
+                select(User).where(
+                    User.username.in_(mentioned_usernames),
+                    User.is_active.is_(True),
+                )
+            ).scalars().all()
+            for mu in mention_users:
+                if int(mu.id) not in already_notified_ids:
+                    create_notification(
+                        db,
+                        recipient_user_id=int(mu.id),
+                        actor_user_id=int(payload.user_id),
+                        notification_type="mention",
+                        entity_type="comment",
+                        entity_id=int(comment.id),
+                        payload={
+                            "kind": "mention",
+                            "post_id": int(post_id),
+                            "comment_id": int(comment.id),
+                        },
+                    )
     except Exception:
         # Comment creation should still succeed if notification write fails.
         pass
@@ -765,7 +1023,7 @@ def toggle_post_bookmark(
     payload: PostBookmarkIn,
     db: Session = Depends(get_db),
 ) -> PostBookmarkOut:
-    _ensure_post_exists(db, post_id)
+    post = _ensure_post_exists(db, post_id)
 
     existing = db.execute(
         select(Bookmark).where(
@@ -785,6 +1043,19 @@ def toggle_post_bookmark(
             )
         )
         metrics.bookmarks_count += 1
+        try:
+            if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+                create_notification(
+                    db,
+                    recipient_user_id=int(post.author_user_id),
+                    actor_user_id=int(payload.user_id),
+                    notification_type="post_bookmarked",
+                    entity_type="post",
+                    entity_id=int(post_id),
+                    payload={"kind": "post_bookmarked", "post_id": int(post_id)},
+                )
+        except Exception:
+            pass
     else:
         db.delete(existing)
         metrics.bookmarks_count = max(0, metrics.bookmarks_count - 1)
