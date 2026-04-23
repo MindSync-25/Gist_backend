@@ -42,7 +42,7 @@ def startup_tasks() -> None:
         ensure_runtime_schema()
     except Exception as exc:
         logger.warning("Runtime schema check skipped: %s", exc)
-    _scheduler.add_job(_run_hourly_interest_digest, "interval", hours=1, id="hourly_interest_digest")
+    _scheduler.add_job(_run_hourly_interest_digest, "interval", hours=2, id="hourly_interest_digest")
     _scheduler.start()
 
 

@@ -303,7 +303,10 @@ def create_notification(
                 if actor_row:
                     actor_name = actor_row.display_name
             if row.fcm_push_token:
-                _send_fcm_push(row.fcm_push_token, notification_type, actor_name, body)
+                fcm_result = send_fcm_push(row.fcm_push_token, notification_type, actor_name, body)
+                if not fcm_result.get("ok") and row.expo_push_token:
+                    # Keep delivery robust when FCM creds/token are temporarily invalid.
+                    _send_expo_push(row.expo_push_token, notification_type, actor_name, body)
             elif row.expo_push_token:
                 _send_expo_push(row.expo_push_token, notification_type, actor_name, body)
     except Exception as exc:  # noqa: BLE001
