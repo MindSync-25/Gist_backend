@@ -1,3 +1,5 @@
+import hashlib
+import random
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -205,6 +207,7 @@ def list_comics(
     offset: int = Query(default=0, ge=0),
     language: str = Query(default="en"),
     viewer_user_id: int | None = Query(default=None, ge=1),
+    feed_seed: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
 ) -> list[ComicOut]:
     active_language = _normalize_language_code(language)
@@ -212,11 +215,19 @@ def list_comics(
 
     preferred_categories = _viewer_preferred_comic_categories(db, viewer_user_id)
     if not preferred_categories:
-        rows = list(
+        # Keep pagination stable per seed: shuffle a bounded recency pool, then slice.
+        pool_size = min((offset + limit) * 4, 400)
+        pool = list(
             db.execute(
-                base_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(limit).offset(offset)
+                base_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(pool_size)
             ).scalars().all()
         )
+        if feed_seed:
+            seed_key = f"{feed_seed or 'default'}:{viewer_user_id}"
+            seed_int = int(hashlib.md5(seed_key.encode()).hexdigest(), 16) % (2 ** 31)
+            rng = random.Random(seed_int)
+            rng.shuffle(pool)
+        rows = pool[offset:offset + limit]
     else:
         # Blend: ~75% preferred categories + ~25% discovery (other categories)
         need = limit + offset
@@ -263,6 +274,11 @@ def list_comics(
                         merged.append(interest_comics[ii]); ii += 1; added += 1
             if added == 0:
                 break
+        if feed_seed:
+            seed_key = f"{feed_seed or 'default'}:{viewer_user_id}"
+            seed_int = int(hashlib.md5(seed_key.encode()).hexdigest(), 16) % (2 ** 31)
+            rng = random.Random(seed_int)
+            rng.shuffle(merged)
         rows = merged[offset:offset + limit]
 
     comic_ids = [comic.id for comic in rows]
