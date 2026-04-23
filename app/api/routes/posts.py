@@ -1,11 +1,11 @@
 import random
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, literal, or_, select, text, union_all
 from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url, extract_managed_user_upload_key
@@ -22,6 +22,9 @@ from app.models.post import Post
 from app.models.post_metric import PostMetric
 from app.models.post_reaction import PostReaction
 from app.models.post_share import PostShare
+from app.models.short import Short
+from app.models.short_metric import ShortMetric
+from app.models.short_reaction import ShortReaction
 from app.models.topic import Topic
 from app.models.user import User
 from app.models.user_block import UserBlock
@@ -43,44 +46,54 @@ def _s3_client():
     return boto3.Session(**kwargs).client("s3", region_name=settings.aws_region)
 
 
-def _resolve_image_url(image_url: str | None) -> str | None:
-    if not image_url:
+def _extract_s3_bucket_and_key(url: str) -> tuple[str, str] | None:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path.lstrip("/")
+    if not path:
         return None
 
-    # If we already have a presigned URL, keep it as-is.
+    # Virtual-hosted style: <bucket>.s3.<region>.amazonaws.com/<key>
+    if ".s3." in host and host.endswith("amazonaws.com"):
+        bucket = host.split(".s3.", 1)[0]
+        if bucket and path:
+            return bucket, path
+
+    # Path style: s3.<region>.amazonaws.com/<bucket>/<key>
+    if (host.startswith("s3.") or host == "s3.amazonaws.com") and "/" in path:
+        bucket, key = path.split("/", 1)
+        if bucket and key:
+            return bucket, key
+
+    return None
+
+
+def _resolve_image_url(image_url: str | None) -> str | None:
+    """Re-sign R2 URLs for serving; pass through external/CDN URLs as-is."""
+    from app.core.r2 import is_r2_url, presign_r2_get
+    if not image_url:
+        return None
+    # Already a presigned URL — return as-is
     if "x-amz-signature=" in image_url.lower():
         return image_url
-
-    parsed = urlparse(image_url)
-    if parsed.scheme not in {"http", "https"}:
-        return image_url
-
-    settings = get_settings()
-    expected_hosts = {
-        f"{settings.s3_bucket_name}.s3.{settings.aws_region}.amazonaws.com",
-        f"{settings.s3_bucket_name}.s3.amazonaws.com",
-    }
-
-    if parsed.netloc.lower() not in expected_hosts:
-        return image_url
-
-    object_key = parsed.path.lstrip("/")
-    if not object_key:
-        return image_url
-
-    try:
-        s3 = _s3_client()
-        return s3.generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": settings.s3_bucket_name,
-                "Key": object_key,
-            },
-            ExpiresIn=settings.s3_presign_expiry_seconds,
-        )
-    except Exception:
-        # Keep the original URL as fallback if signing fails.
-        return image_url
+    # R2 URL — re-sign with fresh expiry
+    if is_r2_url(image_url):
+        return presign_r2_get(image_url)
+    # Legacy S3 URL — return fresh GET presigned URL
+    s3_ref = _extract_s3_bucket_and_key(image_url)
+    if s3_ref is not None:
+        bucket, key = s3_ref
+        settings = get_settings()
+        try:
+            return _s3_client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=settings.s3_content_presign_expiry_seconds,
+            )
+        except Exception:
+            return image_url
+    # External / CDN URL — return as-is
+    return image_url
 
 
 def _map_post_out(
@@ -89,6 +102,7 @@ def _map_post_out(
     liked_by_viewer: bool = False,
     bookmarked_by_viewer: bool = False,
     author: User | None = None,
+    comments_count_override: int | None = None,
 ) -> PostOut:
     author_avatar_display_url = None
     author_avatar_display_expires_at = None
@@ -116,17 +130,77 @@ def _map_post_out(
         image_aspect_ratio=float(post.image_aspect_ratio) if post.image_aspect_ratio is not None else None,
         image_style=post.image_style,
         format=post.format,
+        visibility=post.visibility,
         status=post.status,
         published_at=post.published_at,
         created_at=post.created_at,
         updated_at=post.updated_at,
         likes_count=metric.likes_count if metric else 0,
-        comments_count=metric.comments_count if metric else 0,
+        comments_count=(comments_count_override if comments_count_override is not None else (metric.comments_count if metric else 0)),
         shares_count=metric.shares_count if metric else 0,
         bookmarks_count=metric.bookmarks_count if metric else 0,
         liked_by_viewer=liked_by_viewer,
         bookmarked_by_viewer=bookmarked_by_viewer,
     )
+
+
+def _map_short_to_post_out(
+    short: Short,
+    metric: ShortMetric | None,
+    liked_by_viewer: bool = False,
+) -> PostOut:
+    """Map a Short to PostOut so it can appear in the trending feed alongside posts."""
+    now = datetime.now(timezone.utc)
+    published_at = short.published_at or short.created_at or now
+    return PostOut(
+        id=short.id,
+        source_type="short",
+        comic_id=None,
+        author_user_id=short.author_user_id,
+        author_username=None,
+        author_display_name=None,
+        author_avatar_url=None,
+        author_avatar_display_url=None,
+        author_avatar_display_expires_at=None,
+        character_id=short.character_id,
+        topic_id=short.topic_id,
+        series_id=None,
+        title=short.title or "",
+        description=short.description or "",
+        context=short.description or "",
+        image_url=_resolve_image_url(short.thumbnail_url),
+        video_url=_resolve_image_url(short.r2_public_url),
+        media_urls=None,
+        image_aspect_ratio=float(short.aspect_ratio) if short.aspect_ratio is not None else 0.56,
+        image_style=None,
+        video_style=None,
+        format="immersive",
+        visibility=short.visibility,
+        status=short.status,
+        published_at=published_at,
+        created_at=short.created_at or now,
+        updated_at=short.updated_at or short.created_at or now,
+        likes_count=metric.likes_count if metric else 0,
+        comments_count=metric.comments_count if metric else 0,
+        shares_count=metric.shares_count if metric else 0,
+        bookmarks_count=0,
+        liked_by_viewer=liked_by_viewer,
+        bookmarked_by_viewer=False,
+    )
+
+
+def _published_comment_counts_by_post(db: Session, post_ids: list[int]) -> dict[int, int]:
+    if not post_ids:
+        return {}
+    rows = db.execute(
+        select(Comment.post_id, func.count(Comment.id))
+        .where(
+            Comment.post_id.in_(post_ids),
+            Comment.status == "published",
+        )
+        .group_by(Comment.post_id)
+    ).all()
+    return {int(post_id): int(count) for post_id, count in rows}
 
 
 def _get_or_create_metrics(db: Session, post_id: int) -> PostMetric:
@@ -458,13 +532,307 @@ def list_posts(
     offset: int = Query(default=0, ge=0),
     author_user_id: int | None = Query(default=None, ge=1),
     viewer_user_id: int | None = Query(default=None, ge=1),
+    filter: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[PostOut]:
     blocked_user_ids: list[int] = []
     if viewer_user_id is not None:
         blocked_user_ids = _get_blocked_user_ids(db, viewer_user_id)
 
-    if author_user_id is not None:
+    if filter == "trending":
+        # Trending: posts + shorts ranked together by the same engagement score.
+        # UNION ALL both content types, sort by score, take the top N.
+        # No fixed ratio — score determines position, not content type.
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=48)
+
+        post_scored = (
+            select(
+                literal("post").label("entity_type"),
+                Post.id.label("entity_id"),
+                Post.published_at.label("published_at"),
+                (PostMetric.likes_count + PostMetric.comments_count * 2 + PostMetric.shares_count * 3).label("score"),
+            )
+            .join(PostMetric, PostMetric.post_id == Post.id)
+            .where(Post.status == "published", Post.published_at >= cutoff)
+        )
+        if blocked_user_ids:
+            post_scored = post_scored.where(Post.author_user_id.notin_(blocked_user_ids))
+
+        short_scored = (
+            select(
+                literal("short").label("entity_type"),
+                Short.id.label("entity_id"),
+                Short.published_at.label("published_at"),
+                (ShortMetric.likes_count + ShortMetric.comments_count * 2 + ShortMetric.shares_count * 3).label("score"),
+            )
+            .join(ShortMetric, ShortMetric.short_id == Short.id)
+            .where(Short.status == "published", Short.visibility == "public", func.coalesce(Short.published_at, Short.created_at) >= cutoff)
+        )
+
+        combined = union_all(post_scored, short_scored).subquery()
+        ranked_rows = db.execute(
+            select(combined.c.entity_type, combined.c.entity_id)
+            .order_by(combined.c.score.desc(), combined.c.published_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+
+        if not ranked_rows:
+            return []
+
+        # Split IDs by type, preserving ranked order
+        ordered_keys: list[tuple[str, int]] = [(r.entity_type, r.entity_id) for r in ranked_rows]
+        post_ids_needed = [eid for etype, eid in ordered_keys if etype == "post"]
+        short_ids_needed = [eid for etype, eid in ordered_keys if etype == "short"]
+
+        # Fetch posts
+        posts_by_id: dict[int, Post] = {}
+        metric_by_post_id: dict[int, PostMetric] = {}
+        comments_count_by_post_id: dict[int, int] = {}
+        users_by_id: dict[int, User] = {}
+        liked_post_ids: set[int] = set()
+        bookmarked_post_ids: set[int] = set()
+
+        if post_ids_needed:
+            posts_by_id = {
+                p.id: p for p in db.execute(select(Post).where(Post.id.in_(post_ids_needed))).scalars().all()
+            }
+            metric_by_post_id = {
+                m.post_id: m for m in db.execute(select(PostMetric).where(PostMetric.post_id.in_(post_ids_needed))).scalars().all()
+            }
+            comments_count_by_post_id = _published_comment_counts_by_post(db, post_ids_needed)
+            author_ids = {p.author_user_id for p in posts_by_id.values() if p.author_user_id is not None}
+            if author_ids:
+                users_by_id = {u.id: u for u in db.execute(select(User).where(User.id.in_(author_ids))).scalars().all()}
+            if viewer_user_id is not None:
+                liked_post_ids = set(db.execute(
+                    select(PostReaction.post_id).where(
+                        PostReaction.post_id.in_(post_ids_needed),
+                        PostReaction.user_id == viewer_user_id,
+                        PostReaction.reaction_type == "like",
+                    )
+                ).scalars().all())
+                bookmarked_post_ids = set(db.execute(
+                    select(Bookmark.post_id).where(
+                        Bookmark.post_id.in_(post_ids_needed),
+                        Bookmark.user_id == viewer_user_id,
+                    )
+                ).scalars().all())
+
+        # Fetch shorts
+        shorts_by_id: dict[int, Short] = {}
+        metric_by_short_id: dict[int, ShortMetric] = {}
+        liked_short_ids: set[int] = set()
+
+        if short_ids_needed:
+            shorts_by_id = {
+                s.id: s for s in db.execute(select(Short).where(Short.id.in_(short_ids_needed))).scalars().all()
+            }
+            metric_by_short_id = {
+                m.short_id: m for m in db.execute(select(ShortMetric).where(ShortMetric.short_id.in_(short_ids_needed))).scalars().all()
+            }
+            if viewer_user_id is not None:
+                liked_short_ids = set(db.execute(
+                    select(ShortReaction.short_id).where(
+                        ShortReaction.short_id.in_(short_ids_needed),
+                        ShortReaction.user_id == viewer_user_id,
+                    )
+                ).scalars().all())
+
+        # Reconstruct in ranked order
+        result: list[PostOut] = []
+        for entity_type, entity_id in ordered_keys:
+            if entity_type == "post":
+                p = posts_by_id.get(entity_id)
+                if p:
+                    result.append(_map_post_out(
+                        p,
+                        metric_by_post_id.get(p.id),
+                        p.id in liked_post_ids,
+                        p.id in bookmarked_post_ids,
+                        users_by_id.get(p.author_user_id) if p.author_user_id is not None else None,
+                        comments_count_by_post_id.get(p.id, 0),
+                    ))
+            else:
+                s = shorts_by_id.get(entity_id)
+                if s:
+                    result.append(_map_short_to_post_out(s, metric_by_short_id.get(s.id), s.id in liked_short_ids))
+        return result
+    elif filter == "nearby":
+        # In Your City: posts + shorts ordered by distance (closest first).
+        # Uses Haversine formula in raw SQL — no PostGIS required.
+        # Expanding radius tiers: 20 → 50 → 100 → 500 → 1000 km until
+        # we have at least `limit` combined candidates to page through.
+        if viewer_user_id is None:
+            return []
+        viewer = db.get(User, viewer_user_id)
+        if viewer is None or viewer.latitude is None or viewer.longitude is None:
+            return []
+
+        viewer_lat = float(viewer.latitude)
+        viewer_lng = float(viewer.longitude)
+
+        # Build blocked-user exclusion snippet for raw SQL
+        blocked_sql_p = ""
+        blocked_sql_s = ""
+        if blocked_user_ids:
+            id_list = ",".join(str(i) for i in blocked_user_ids)
+            blocked_sql_p = f"AND p.author_user_id NOT IN ({id_list})"
+            blocked_sql_s = f"AND s.author_user_id NOT IN ({id_list})"
+
+        # Haversine distance expression (km).
+        haversine_p = (
+            "6371 * acos(LEAST(1.0, GREATEST(-1.0, "
+            "  cos(radians(:vlat)) * cos(radians(u.latitude)) "
+            "  * cos(radians(u.longitude) - radians(:vlng)) "
+            "  + sin(radians(:vlat)) * sin(radians(u.latitude)) "
+            ")))"
+        )
+        haversine_s = haversine_p  # same formula, alias differs (u is joined same way)
+
+        RADIUS_TIERS_KM = [20, 50, 100, 500, 1000]
+        radius_km = RADIUS_TIERS_KM[-1]
+        for tier in RADIUS_TIERS_KM:
+            count_row = db.execute(
+                text(
+                    f"""
+                    SELECT COUNT(*) FROM (
+                        SELECT p.id FROM posts p
+                        JOIN users u ON u.id = p.author_user_id
+                        WHERE p.status = 'published'
+                          AND p.visibility = 'public'
+                          AND u.is_active = true
+                          AND u.latitude IS NOT NULL
+                          AND u.longitude IS NOT NULL
+                          AND ({haversine_p}) <= :radius_km
+                          {blocked_sql_p}
+                        UNION ALL
+                        SELECT s.id FROM shorts s
+                        JOIN users u ON u.id = s.author_user_id
+                        WHERE s.status = 'published'
+                          AND s.visibility = 'public'
+                          AND u.is_active = true
+                          AND u.latitude IS NOT NULL
+                          AND u.longitude IS NOT NULL
+                          AND ({haversine_s}) <= :radius_km
+                          {blocked_sql_s}
+                    ) combined
+                    """
+                ),
+                {"vlat": viewer_lat, "vlng": viewer_lng, "radius_km": tier},
+            ).scalar()
+            if (count_row or 0) >= limit:
+                radius_km = tier
+                break
+
+        nearby_rows = db.execute(
+            text(
+                f"""
+                SELECT entity_type, entity_id FROM (
+                    SELECT 'post' AS entity_type, p.id AS entity_id,
+                           ({haversine_p}) AS distance_km,
+                           p.published_at AS published_at
+                    FROM posts p
+                    JOIN users u ON u.id = p.author_user_id
+                    WHERE p.status = 'published'
+                      AND p.visibility = 'public'
+                      AND u.is_active = true
+                      AND u.latitude IS NOT NULL
+                      AND u.longitude IS NOT NULL
+                      AND ({haversine_p}) <= :radius_km
+                      {blocked_sql_p}
+                    UNION ALL
+                    SELECT 'short' AS entity_type, s.id AS entity_id,
+                           ({haversine_s}) AS distance_km,
+                           COALESCE(s.published_at, s.created_at) AS published_at
+                    FROM shorts s
+                    JOIN users u ON u.id = s.author_user_id
+                    WHERE s.status = 'published'
+                      AND s.visibility = 'public'
+                      AND u.is_active = true
+                      AND u.latitude IS NOT NULL
+                      AND u.longitude IS NOT NULL
+                      AND ({haversine_s}) <= :radius_km
+                      {blocked_sql_s}
+                ) combined
+                ORDER BY distance_km ASC, published_at DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            {"vlat": viewer_lat, "vlng": viewer_lng, "radius_km": radius_km, "limit": limit, "offset": offset},
+        ).all()
+
+        if not nearby_rows:
+            return []
+
+        ordered_keys: list[tuple[str, int]] = [(r.entity_type, r.entity_id) for r in nearby_rows]
+        post_ids_needed = [eid for etype, eid in ordered_keys if etype == "post"]
+        short_ids_needed = [eid for etype, eid in ordered_keys if etype == "short"]
+
+        # Fetch posts
+        nearby_posts_by_id: dict[int, Post] = {}
+        nearby_metrics_by_post: dict[int, PostMetric] = {}
+        nearby_comments_by_post: dict[int, int] = {}
+        nearby_users_by_id: dict[int, User] = {}
+        nearby_liked_post_ids: set[int] = set()
+        nearby_bookmarked_post_ids: set[int] = set()
+        if post_ids_needed:
+            nearby_posts_by_id = {p.id: p for p in db.execute(select(Post).where(Post.id.in_(post_ids_needed))).scalars().all()}
+            nearby_metrics_by_post = {m.post_id: m for m in db.execute(select(PostMetric).where(PostMetric.post_id.in_(post_ids_needed))).scalars().all()}
+            nearby_comments_by_post = _published_comment_counts_by_post(db, post_ids_needed)
+            nearby_author_ids = {p.author_user_id for p in nearby_posts_by_id.values() if p.author_user_id is not None}
+            if nearby_author_ids:
+                nearby_users_by_id = {u.id: u for u in db.execute(select(User).where(User.id.in_(nearby_author_ids))).scalars().all()}
+            if viewer_user_id is not None:
+                nearby_liked_post_ids = set(db.execute(
+                    select(PostReaction.post_id).where(
+                        PostReaction.post_id.in_(post_ids_needed),
+                        PostReaction.user_id == viewer_user_id,
+                        PostReaction.reaction_type == "like",
+                    )
+                ).scalars().all())
+                nearby_bookmarked_post_ids = set(db.execute(
+                    select(Bookmark.post_id).where(
+                        Bookmark.post_id.in_(post_ids_needed),
+                        Bookmark.user_id == viewer_user_id,
+                    )
+                ).scalars().all())
+
+        # Fetch shorts
+        nearby_shorts_by_id: dict[int, Short] = {}
+        nearby_metrics_by_short: dict[int, ShortMetric] = {}
+        nearby_liked_short_ids: set[int] = set()
+        if short_ids_needed:
+            nearby_shorts_by_id = {s.id: s for s in db.execute(select(Short).where(Short.id.in_(short_ids_needed))).scalars().all()}
+            nearby_metrics_by_short = {m.short_id: m for m in db.execute(select(ShortMetric).where(ShortMetric.short_id.in_(short_ids_needed))).scalars().all()}
+            if viewer_user_id is not None:
+                nearby_liked_short_ids = set(db.execute(
+                    select(ShortReaction.short_id).where(
+                        ShortReaction.short_id.in_(short_ids_needed),
+                        ShortReaction.user_id == viewer_user_id,
+                    )
+                ).scalars().all())
+
+        # Reconstruct in distance order
+        nearby_result: list[PostOut] = []
+        for entity_type, entity_id in ordered_keys:
+            if entity_type == "post":
+                p = nearby_posts_by_id.get(entity_id)
+                if p:
+                    nearby_result.append(_map_post_out(
+                        p,
+                        nearby_metrics_by_post.get(p.id),
+                        p.id in nearby_liked_post_ids,
+                        p.id in nearby_bookmarked_post_ids,
+                        nearby_users_by_id.get(p.author_user_id) if p.author_user_id is not None else None,
+                        nearby_comments_by_post.get(p.id, 0),
+                    ))
+            else:
+                s = nearby_shorts_by_id.get(entity_id)
+                if s:
+                    nearby_result.append(_map_short_to_post_out(s, nearby_metrics_by_short.get(s.id), entity_id in nearby_liked_short_ids))
+        return nearby_result
+    elif author_user_id is not None:
         if blocked_user_ids and author_user_id in blocked_user_ids:
             return []
 
@@ -500,6 +868,7 @@ def list_posts(
         select(PostMetric).where(PostMetric.post_id.in_(post_ids))
     ).scalars().all()
     metric_by_post_id = {metric.post_id: metric for metric in metrics}
+    comments_count_by_post_id = _published_comment_counts_by_post(db, post_ids)
 
     author_ids = {post.author_user_id for post in posts if post.author_user_id is not None}
     users_by_id: dict[int, User] = {}
@@ -538,6 +907,7 @@ def list_posts(
             post.id in liked_post_ids,
             post.id in bookmarked_post_ids,
             users_by_id.get(post.author_user_id) if post.author_user_id is not None else None,
+            comments_count_by_post_id.get(post.id, 0),
         )
         for post in posts
     ]
@@ -576,6 +946,7 @@ def list_saved_posts(
         select(PostMetric).where(PostMetric.post_id.in_(saved_post_ids))
     ).scalars().all()
     metric_by_post_id = {m.post_id: m for m in metrics}
+    comments_count_by_post_id = _published_comment_counts_by_post(db, saved_post_ids)
 
     author_ids = {post.author_user_id for post in ordered_posts if post.author_user_id is not None}
     users_by_id: dict[int, User] = {}
@@ -602,6 +973,7 @@ def list_saved_posts(
             liked_by_viewer=post.id in liked_post_ids,
             bookmarked_by_viewer=True,  # these are always bookmarked by definition
             author=users_by_id.get(post.author_user_id) if post.author_user_id is not None else None,
+            comments_count_override=comments_count_by_post_id.get(post.id, 0),
         )
         for post in ordered_posts
     ]
@@ -641,7 +1013,8 @@ def get_post(
         )
 
     author = db.get(User, post.author_user_id) if post.author_user_id is not None else None
-    return _map_post_out(post, metric, liked_by_viewer, bookmarked_by_viewer, author)
+    comments_count = _published_comment_counts_by_post(db, [post_id]).get(post_id, 0)
+    return _map_post_out(post, metric, liked_by_viewer, bookmarked_by_viewer, author, comments_count)
 
 
 @router.get("/{post_id}/comments", response_model=list[CommentOut])

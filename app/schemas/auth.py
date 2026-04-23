@@ -72,6 +72,8 @@ class ProfileUpdateIn(BaseModel):
     location: str | None = Field(default=None, max_length=120)
     avatar_url: str | None = Field(default=None, max_length=2048)
     language: str | None = Field(default=None, max_length=10)
+    latitude: float | None = Field(default=None, ge=-90.0, le=90.0)
+    longitude: float | None = Field(default=None, ge=-180.0, le=180.0)
 
 
 class LogoutOut(BaseModel):

@@ -554,6 +554,12 @@ def update_me(
         location = updates["location"]
         current_user.location = (location.strip() or None) if isinstance(location, str) else None
 
+    if "latitude" in updates:
+        current_user.latitude = updates["latitude"]
+
+    if "longitude" in updates:
+        current_user.longitude = updates["longitude"]
+
     if "language" in updates:
         language = updates["language"]
         current_user.language = (language.strip() or "en") if isinstance(language, str) else "en"

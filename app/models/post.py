@@ -16,6 +16,7 @@ class Post(Base):
             name="ck_posts_format",
         ),
         CheckConstraint("status IN ('draft', 'published', 'archived', 'deleted')", name="ck_posts_status"),
+        CheckConstraint("visibility IN ('public', 'followers_only')", name="ck_posts_visibility"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
@@ -30,9 +31,12 @@ class Post(Base):
     context: Mapped[str] = mapped_column(Text, nullable=False, default="")
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_urls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    video_style: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     image_aspect_ratio: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     image_style: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     format: Mapped[str] = mapped_column(String(20), nullable=False, default="hero")
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="public")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="published")
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

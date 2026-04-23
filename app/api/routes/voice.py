@@ -17,6 +17,7 @@ from app.models.voice_take import VoiceTake
 from app.schemas.voice import (
     ParticipationStreamItem,
     TopVoiceOut,
+    VoiceUserActivityItemOut,
     VoiceTakeDeleteOut,
     VoiceIssueCreateIn,
     VoiceIssueOut,
@@ -855,3 +856,94 @@ def get_participation_stream(
         items = [ParticipationStreamItem(text="Be the first to join the discussion.")]
 
     return items
+
+
+@router.get("/users/{user_id}/activity", response_model=list[VoiceUserActivityItemOut])
+def get_user_voice_activity(
+    user_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> list[VoiceUserActivityItemOut]:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    items: list[VoiceUserActivityItemOut] = []
+
+    issues = db.execute(
+        select(VoiceIssue)
+        .where(VoiceIssue.created_by_user_id == user_id)
+        .order_by(VoiceIssue.created_at.desc())
+        .limit(limit)
+    ).scalars().all()
+    for issue in issues:
+        items.append(
+            VoiceUserActivityItemOut(
+                id=f"issue-{issue.id}",
+                kind="issue_created",
+                created_at=issue.created_at,
+                issue_id=issue.id,
+                issue_title=issue.title,
+                content=issue.context,
+            )
+        )
+
+    takes = db.execute(
+        select(VoiceTake, VoiceIssue.title)
+        .join(VoiceIssue, VoiceIssue.id == VoiceTake.issue_id)
+        .where(VoiceTake.user_id == user_id, VoiceTake.status == "published")
+        .order_by(VoiceTake.created_at.desc())
+        .limit(limit)
+    ).all()
+    for take, issue_title in takes:
+        items.append(
+            VoiceUserActivityItemOut(
+                id=f"take-{take.id}",
+                kind="take_created",
+                created_at=take.created_at,
+                issue_id=take.issue_id,
+                issue_title=issue_title,
+                stance=take.stance,
+                content=take.body,
+            )
+        )
+
+    stances = db.execute(
+        select(VoiceStance, VoiceIssue.title)
+        .join(VoiceIssue, VoiceIssue.id == VoiceStance.issue_id)
+        .where(VoiceStance.user_id == user_id)
+        .order_by(VoiceStance.updated_at.desc())
+        .limit(limit)
+    ).all()
+    for stance, issue_title in stances:
+        items.append(
+            VoiceUserActivityItemOut(
+                id=f"stance-{stance.id}",
+                kind="stance_set",
+                created_at=stance.updated_at,
+                issue_id=stance.issue_id,
+                issue_title=issue_title,
+                stance=stance.stance,
+            )
+        )
+
+    poll_votes = db.execute(
+        select(VoicePollVote, VoicePoll.question)
+        .join(VoicePoll, VoicePoll.id == VoicePollVote.poll_id)
+        .where(VoicePollVote.user_id == user_id)
+        .order_by(VoicePollVote.created_at.desc())
+        .limit(limit)
+    ).all()
+    for vote, poll_question in poll_votes:
+        items.append(
+            VoiceUserActivityItemOut(
+                id=f"poll-vote-{vote.id}",
+                kind="poll_voted",
+                created_at=vote.created_at,
+                poll_id=vote.poll_id,
+                poll_question=poll_question,
+            )
+        )
+
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    return items[:limit]

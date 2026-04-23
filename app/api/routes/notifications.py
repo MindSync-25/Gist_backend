@@ -46,6 +46,7 @@ def list_notifications(
             LEFT JOIN users u ON u.id = n.actor_user_id
             WHERE n.recipient_user_id = :recipient_user_id
               AND (:unread_only = FALSE OR n.is_read = FALSE)
+              AND NOT (n.notification_type = 'system' AND n.payload->>'kind' = 'interest_hourly')
             ORDER BY n.created_at DESC, n.id DESC
             LIMIT :limit
             OFFSET :offset
@@ -95,6 +96,7 @@ def unread_count(
             FROM notifications
             WHERE recipient_user_id = :recipient_user_id
               AND is_read = FALSE
+              AND NOT (notification_type = 'system' AND payload->>'kind' = 'interest_hourly')
             """
         ),
         {"recipient_user_id": int(current_user.id)},
@@ -155,3 +157,22 @@ def mark_all_notifications_read(
     db.commit()
     marked = int(result.rowcount or 0)
     return NotificationReadAllOut(ok=True, marked_count=marked)
+
+
+@router.delete("", response_model=NotificationReadAllOut)
+def delete_all_notifications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> NotificationReadAllOut:
+    result = db.execute(
+        text(
+            """
+            DELETE FROM notifications
+            WHERE recipient_user_id = :recipient_user_id
+              AND NOT (notification_type = 'system' AND payload->>'kind' = 'interest_hourly')
+            """
+        ),
+        {"recipient_user_id": int(current_user.id)},
+    )
+    db.commit()
+    return NotificationReadAllOut(ok=True, marked_count=int(result.rowcount or 0))

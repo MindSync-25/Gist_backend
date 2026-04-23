@@ -25,6 +25,7 @@ class ConversationParticipantOut(BaseModel):
 class ConversationOut(BaseModel):
     id: str
     conversation_type: str
+    conversation_status: Literal["accepted", "request", "rejected", "archived"] = "accepted"
     participants: list[ConversationParticipantOut]
     last_message_preview: str
     last_message_at: str
@@ -48,3 +49,9 @@ class MessageDeleteOut(BaseModel):
     ok: bool
     conversation_id: str
     message_id: str
+
+
+class ConversationStatusUpdateOut(BaseModel):
+    ok: bool
+    conversation_id: str
+    conversation_status: Literal["accepted", "request", "rejected", "archived"]

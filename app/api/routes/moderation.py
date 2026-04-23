@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
+from app.models.comic import Comic
 from app.models.comic_comment import ComicComment
 from app.models.comment import Comment
 from app.models.post import Post
@@ -32,6 +33,12 @@ def _validate_report_target_exists(db: Session, entity_type: str, entity_id: int
         comment = db.get(Comment, entity_id)
         if comment is None:
             raise HTTPException(status_code=404, detail="Reported comment not found")
+        return
+
+    if entity_type == "comic":
+        comic = db.get(Comic, entity_id)
+        if comic is None:
+            raise HTTPException(status_code=404, detail="Reported comic not found")
         return
 
     if entity_type == "comic_comment":

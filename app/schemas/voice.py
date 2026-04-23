@@ -170,6 +170,18 @@ class ParticipationStreamItem(BaseModel):
     text: str
 
 
+class VoiceUserActivityItemOut(BaseModel):
+    id: str
+    kind: str  # issue_created | take_created | stance_set | poll_voted
+    created_at: datetime
+    issue_id: int | None = None
+    issue_title: str | None = None
+    stance: str | None = None
+    content: str | None = None
+    poll_id: int | None = None
+    poll_question: str | None = None
+
+
 try:
     VoiceTakeReplyOut.model_rebuild()
 except AttributeError:

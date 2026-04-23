@@ -20,6 +20,7 @@ from app.schemas.message import (
     ConversationCreateDirectIn,
     ConversationOut,
     MessageDeleteOut,
+    ConversationStatusUpdateOut,
     ConversationParticipantOut,
     MessageCreateIn,
     MessageOut,
@@ -163,6 +164,7 @@ def _put_conversation_shell(conversation_id: str, participants: list[int], creat
     )
 
     for uid in participants:
+        status = "accepted" if int(uid) == int(created_by_user_id) else "request"
         t.put_item(
             Item={
                 "PK": f"USER#{uid}",
@@ -175,6 +177,7 @@ def _put_conversation_shell(conversation_id: str, participants: list[int], creat
                 "last_message_at": now,
                 "last_message_preview": "",
                 "unread_count": 0,
+                "conversation_status": status,
                 "GSI1PK": f"USER#{uid}",
                 "GSI1SK": now,
                 "updated_at": now,
@@ -215,6 +218,22 @@ def _build_participants(participant_ids: list[int], users_by_id: dict[int, User]
     return out
 
 
+def _normalize_member_status(raw: str | None) -> str:
+    allowed = {"accepted", "request", "rejected", "archived"}
+    if raw in allowed:
+        return str(raw)
+    return "accepted"
+
+
+def _set_member_status(conversation_id: str, user_id: int, status: str) -> None:
+    now = _iso_now()
+    _table().update_item(
+        Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"},
+        UpdateExpression="SET conversation_status=:status, updated_at=:upd",
+        ExpressionAttributeValues={":status": status, ":upd": now},
+    )
+
+
 @router.post("/conversations/direct", response_model=ConversationOut)
 def create_or_get_direct_conversation(
     payload: ConversationCreateDirectIn,
@@ -239,6 +258,15 @@ def create_or_get_direct_conversation(
     if meta is None:
         _put_conversation_shell(conversation_id, [current_user.id, payload.other_user_id], current_user.id)
         meta = t.get_item(Key={"PK": f"CONV#{conversation_id}", "SK": "META"}).get("Item")
+    else:
+        # Re-opening an old direct chat should keep sender in inbox, and re-create a request
+        # for the recipient if they had previously rejected/archived it.
+        _set_member_status(conversation_id, int(current_user.id), "accepted")
+        other_member = t.get_item(
+            Key={"PK": f"USER#{payload.other_user_id}", "SK": f"CONV#{conversation_id}"}
+        ).get("Item")
+        if _normalize_member_status((other_member or {}).get("conversation_status")) in {"rejected", "archived"}:
+            _set_member_status(conversation_id, int(payload.other_user_id), "request")
 
     participant_ids = [int(v) for v in meta.get("participant_user_ids", [])]
     users_by_id = _get_users_map(db, participant_ids)
@@ -249,10 +277,12 @@ def create_or_get_direct_conversation(
             "SK": f"CONV#{conversation_id}",
         }
     ).get("Item")
+    conversation_status = _normalize_member_status((member_item or {}).get("conversation_status"))
 
     return ConversationOut(
         id=conversation_id,
         conversation_type=str(meta.get("conversation_type", "direct")),
+        conversation_status=conversation_status,
         participants=_build_participants(participant_ids, users_by_id),
         last_message_preview=str(meta.get("last_message_preview", "")),
         last_message_at=str(meta.get("last_message_at", now)),
@@ -264,6 +294,7 @@ def create_or_get_direct_conversation(
 @router.get("/conversations", response_model=list[ConversationOut])
 def list_conversations(
     limit: int = Query(default=30, ge=1, le=100),
+    status: str = Query(default="accepted", pattern="^(accepted|request|rejected|archived|all)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[ConversationOut]:
@@ -302,11 +333,15 @@ def list_conversations(
         if not cid or cid not in meta_items:
             continue
         meta = meta_items[cid]
+        member_status = _normalize_member_status(member.get("conversation_status"))
+        if status != "all" and member_status != status:
+            continue
         pids = [int(v) for v in meta.get("participant_user_ids", [])]
         out.append(
             ConversationOut(
                 id=cid,
                 conversation_type=str(meta.get("conversation_type", "direct")),
+                conversation_status=member_status,
                 participants=_build_participants(pids, users_by_id),
                 last_message_preview=str(member.get("last_message_preview", meta.get("last_message_preview", ""))),
                 last_message_at=str(member.get("last_message_at", meta.get("last_message_at", now))),
@@ -316,6 +351,57 @@ def list_conversations(
         )
 
     return out
+
+
+@router.get("/conversations/requests", response_model=list[ConversationOut])
+def list_conversation_requests(
+    limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ConversationOut]:
+    return list_conversations(limit=limit, status="request", db=db, current_user=current_user)
+
+
+@router.post("/conversations/{conversation_id}/accept", response_model=ConversationStatusUpdateOut)
+def accept_conversation_request(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ConversationStatusUpdateOut:
+    _ensure_table_exists()
+    t = _table()
+    member_item = t.get_item(
+        Key={"PK": f"USER#{current_user.id}", "SK": f"CONV#{conversation_id}"}
+    ).get("Item")
+    if member_item is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    member_status = _normalize_member_status((member_item or {}).get("conversation_status"))
+    if member_status in {"rejected", "archived"}:
+        raise HTTPException(status_code=403, detail="Conversation is not active for this user")
+
+    _set_member_status(conversation_id, int(current_user.id), "accepted")
+    return ConversationStatusUpdateOut(ok=True, conversation_id=conversation_id, conversation_status="accepted")
+
+
+@router.post("/conversations/{conversation_id}/reject", response_model=ConversationStatusUpdateOut)
+def reject_conversation_request(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ConversationStatusUpdateOut:
+    _ensure_table_exists()
+    t = _table()
+    member_item = t.get_item(
+        Key={"PK": f"USER#{current_user.id}", "SK": f"CONV#{conversation_id}"}
+    ).get("Item")
+    if member_item is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    _set_member_status(conversation_id, int(current_user.id), "rejected")
+    t.update_item(
+        Key={"PK": f"USER#{current_user.id}", "SK": f"CONV#{conversation_id}"},
+        UpdateExpression="SET unread_count=:uc, updated_at=:upd",
+        ExpressionAttributeValues={":uc": 0, ":upd": _iso_now()},
+    )
+    return ConversationStatusUpdateOut(ok=True, conversation_id=conversation_id, conversation_status="rejected")
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
@@ -383,6 +469,11 @@ async def send_message(
     ).get("Item")
     if member_item is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    sender_status = _normalize_member_status((member_item or {}).get("conversation_status"))
+    if sender_status == "request":
+        raise HTTPException(status_code=403, detail="Accept the conversation request before sending messages")
+    if sender_status in {"rejected", "archived"}:
+        raise HTTPException(status_code=403, detail="Conversation is not active for this user")
 
     if payload.message_type == "text" and not (payload.body and payload.body.strip()):
         raise HTTPException(status_code=400, detail="Message body is required for text messages")
@@ -468,15 +559,21 @@ async def send_message(
         for uid in participant_ids:
             if int(uid) == int(current_user.id):
                 continue
+            recipient_member = t.get_item(
+                Key={"PK": f"USER#{uid}", "SK": f"CONV#{conversation_id}"}
+            ).get("Item")
+            recipient_status = _normalize_member_status((recipient_member or {}).get("conversation_status"))
+            notification_type = "message_request" if recipient_status == "request" else "message"
+            kind = "new_message_request" if recipient_status == "request" else "new_message"
             create_notification(
                 db,
                 recipient_user_id=int(uid),
                 actor_user_id=int(current_user.id),
-                notification_type="message",
+                notification_type=notification_type,
                 entity_type="conversation",
                 entity_id=None,
                 payload={
-                    "kind": "new_message",
+                    "kind": kind,
                     "conversation_id": conversation_id,
                     "message_id": message_id,
                     "preview": preview,

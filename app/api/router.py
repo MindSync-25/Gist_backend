@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.routes.ai import router as ai_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.characters import router as characters_router
 from app.api.routes.comics import router as comics_router
@@ -13,6 +14,9 @@ from app.api.routes.sponsored_campaigns import router as sponsored_campaigns_rou
 from app.api.routes.topics import router as topics_router
 from app.api.routes.upload import router as upload_router
 from app.api.routes.users import router as users_router
+from app.api.routes.music import router as music_router
+from app.api.routes.search import router as search_router
+from app.api.routes.shorts import router as shorts_router
 from app.api.routes.voice import router as voice_router
 
 api_router = APIRouter(prefix="/api/v1")
@@ -30,3 +34,7 @@ api_router.include_router(voice_router)
 api_router.include_router(messages_router)
 api_router.include_router(notifications_router)
 api_router.include_router(moderation_router)
+api_router.include_router(shorts_router)
+api_router.include_router(search_router)
+api_router.include_router(ai_router)
+api_router.include_router(music_router)

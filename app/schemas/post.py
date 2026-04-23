@@ -14,6 +14,28 @@ class ImageStylePayload(BaseModel):
     offset_y: float | None = None
 
 
+class VideoStylePayload(BaseModel):
+    filter: str | None = None
+    frame: Literal["none", "classic", "polaroid", "neon"] | None = None
+    overlay_text: str | None = Field(default=None, max_length=180)
+    overlay_position: Literal["top", "center", "bottom"] | None = None
+    trim_start: float | None = Field(default=None, ge=0)
+    trim_end: float | None = Field(default=None, ge=0)
+    brightness: int | None = Field(default=None, ge=-100, le=100)
+    contrast: int | None = Field(default=None, ge=-100, le=100)
+    saturation: int | None = Field(default=None, ge=-100, le=100)
+    sharpen: int | None = Field(default=None, ge=0, le=100)
+    vignette: int | None = Field(default=None, ge=0, le=100)
+    filter_intensity: int | None = Field(default=None, ge=0, le=100)
+    speed: float | None = Field(default=None, ge=0.25, le=4.0)
+    audio_volume: int | None = Field(default=None, ge=0, le=100)
+    fade_in: float | None = Field(default=None, ge=0, le=10.0)
+    fade_out: float | None = Field(default=None, ge=0, le=10.0)
+    text_color: str | None = Field(default=None, max_length=12)
+    text_font: str | None = Field(default=None, max_length=40)
+    text_style: str | None = Field(default=None, max_length=20)
+
+
 class PostOut(BaseModel):
     id: int
     source_type: str
@@ -32,9 +54,12 @@ class PostOut(BaseModel):
     context: str
     image_url: str | None = None
     video_url: str | None = None
+    media_urls: list[str] | None = None
     image_aspect_ratio: float | None = None
     image_style: ImageStylePayload | None = None
+    video_style: VideoStylePayload | None = None
     format: str
+    visibility: str
     status: str
     published_at: datetime
     created_at: datetime
@@ -54,12 +79,15 @@ class PostCreateIn(BaseModel):
     context: str = ""
     image_url: str | None = None
     video_url: str | None = None
+    media_urls: list[str] | None = None
     image_aspect_ratio: float | None = Field(default=None, gt=0, le=10)
     image_style: ImageStylePayload | None = None
+    video_style: VideoStylePayload | None = None
     format: str = Field(
         default="hero",
         pattern="^(hero|conversation|editorial|floating|magazine|immersive|x-thread)$",
     )
+    visibility: str = Field(default="public", pattern="^(public|followers_only)$")
     character_id: int | None = Field(default=None, gt=0)
     topic_id: int | None = Field(default=None, gt=0)
     series_id: int | None = Field(default=None, gt=0)

@@ -11,6 +11,7 @@ from app.core.comment_moderation import moderate_comment_text
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.notifications import create_notification
+from app.core.r2 import get_r2_client
 from app.models.comic import Comic
 from app.models.comic_comment import ComicComment
 from app.models.comic_comment_reaction import ComicCommentReaction
@@ -39,11 +40,33 @@ def _s3_client():
 
 
 def _fresh_url(s3_key: str | None) -> str | None:
-    """Generate a fresh presigned GET URL from the stable s3_key."""
+    """Generate a fresh presigned GET URL from the stored object key.
+
+    New comics are stored in R2; older rows may still be in legacy S3.
+    """
     if not s3_key:
         return None
+
+    settings = get_settings()
+
+    # Prefer R2 for newly generated comics.
+    if (
+        settings.r2_endpoint
+        and settings.r2_access_key_id
+        and settings.r2_secret_access_key
+        and settings.r2_images_bucket
+    ):
+        try:
+            return get_r2_client().generate_presigned_url(
+                "get_object",
+                Params={"Bucket": settings.r2_images_bucket, "Key": s3_key},
+                ExpiresIn=settings.r2_content_presign_expiry_seconds,
+            )
+        except Exception:
+            pass
+
+    # Legacy fallback: S3-signed comic URLs.
     try:
-        settings = get_settings()
         return _s3_client().generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.s3_bucket_name, "Key": s3_key},

@@ -33,3 +33,5 @@ class User(Base):
     preferred_topic_slugs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list, server_default="{}")
     preferred_languages: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=lambda: ["en"], server_default="{en}")
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    latitude: Mapped[float | None] = mapped_column(nullable=True)
+    longitude: Mapped[float | None] = mapped_column(nullable=True)

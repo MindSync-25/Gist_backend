@@ -6,8 +6,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
-ReportEntityType = Literal["post", "comment", "comic_comment", "user"]
-ReportReason = Literal["spam", "harassment", "misinformation", "nudity", "hate_speech", "other"]
+ReportEntityType = Literal["post", "comment", "comic", "comic_comment", "user"]
+ReportReason = Literal["spam", "harassment", "misinformation", "nudity", "hate_speech", "child_safety", "other"]
 ReportStatus = Literal["pending", "reviewed", "actioned", "dismissed"]
 
 

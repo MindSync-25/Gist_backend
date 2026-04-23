@@ -3,8 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ReportEntityType = Literal["post", "comment", "comic_comment", "user"]
-ReportReason = Literal["spam", "harassment", "misinformation", "nudity", "hate_speech", "other"]
+ReportEntityType = Literal["post", "comment", "comic", "comic_comment", "user"]
+ReportReason = Literal["spam", "harassment", "misinformation", "nudity", "hate_speech", "child_safety", "other"]
 
 
 class BlockOut(BaseModel):

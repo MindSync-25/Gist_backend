@@ -25,6 +25,7 @@ _NOTIF_TYPE_TITLES: dict[str, str] = {
     "voice_vote": "Vote on your voice",
     "voice_reply": "Reply on your voice",
     "message": "New message",
+    "message_request": "New message request",
     "series_update": "Series update",
     "system": "Gist",
     "post_bookmarked": "Post saved",
@@ -51,6 +52,7 @@ def _build_push_body(
         "voice_vote": f"{actor} voted on your voice",
         "voice_reply": f"{actor} replied to your voice",
         "message": f"{actor} sent you a message",
+        "message_request": f"{actor} sent you a message request",
         "series_update": payload.get("title", "A series you follow was updated"),  # type: ignore[arg-type]
         "system": payload.get("message", "You have a new notification"),  # type: ignore[arg-type]
         "post_bookmarked": f"{actor} bookmarked your post",
@@ -597,6 +599,7 @@ def fanout_new_post_notifications(
     topic_id: int | None,
     series_id: int | None,
     title: str,
+    visibility: str = "public",
 ) -> None:
     # Follow-based notifications for creator updates.
     follower_ids = db.execute(
@@ -627,6 +630,10 @@ def fanout_new_post_notifications(
                 "author_user_id": int(author_user_id),
             },
         )
+
+    # Followers-only posts are intentionally contained to followers for privacy.
+    if visibility != "public":
+        return
 
     # Interest-based notifications inferred from prior engagement in same topic.
     if topic_id is not None:
@@ -724,6 +731,20 @@ _HOURLY_DIGEST_TEMPLATES: list[str] = [
 def send_hourly_interest_digest(db: Session) -> None:
     """Send one personalised interest-post push to each eligible user once per hour."""
     try:
+        # Clean up interest_hourly records older than 24 h — they're only needed
+        # for the 55-minute dedup window; no reason to keep them in the DB longer.
+        db.execute(
+            text(
+                """
+                DELETE FROM notifications
+                WHERE notification_type = 'system'
+                  AND payload->>'kind' = 'interest_hourly'
+                  AND created_at < NOW() - INTERVAL '24 hours'
+                """
+            )
+        )
+        db.commit()
+
         user_rows = db.execute(
             text(
                 """
@@ -784,19 +805,41 @@ def send_hourly_interest_digest(db: Session) -> None:
                 candidates = db.execute(
                     text(
                         """
-                                                SELECT p.id, p.title, t.label AS topic_name, p.author_user_id
+                        SELECT p.id, p.title, t.label AS topic_name, p.author_user_id
                         FROM posts p
                         JOIN topics t ON t.id = p.topic_id
                         WHERE t.slug = ANY(:slugs)
                           AND p.status = 'published'
-                          AND p.published_at >= NOW() - INTERVAL '48 hours'
-                          AND p.author_user_id != :uid
+                          AND p.published_at >= NOW() - INTERVAL '7 days'
+                          AND (p.author_user_id IS NULL OR p.author_user_id != :uid)
                         ORDER BY p.published_at DESC
                         LIMIT 50
                         """
                     ),
                     {"slugs": slugs, "uid": user_id},
                 ).mappings().all()
+
+                # Also pull recent comics from the same topics as candidates
+                try:
+                    comic_candidates = db.execute(
+                        text(
+                            """
+                            SELECT c.id + 1000000 AS id,
+                                   COALESCE(c.banner_title, c.headline, 'Latest update') AS title,
+                                   c.category AS topic_name,
+                                   NULL::int AS author_user_id
+                            FROM comics c
+                            WHERE LOWER(c.category) = ANY(:slugs)
+                              AND c.generated_at >= NOW() - INTERVAL '7 days'
+                            ORDER BY c.generated_at DESC
+                            LIMIT 30
+                            """
+                        ),
+                        {"slugs": [s.lower() for s in slugs]},
+                    ).mappings().all()
+                    candidates = list(candidates) + list(comic_candidates)
+                except Exception:
+                    pass  # comics query is best-effort
 
                 fresh = [r for r in candidates if int(r["id"]) not in notified_post_ids]
                 if not fresh:

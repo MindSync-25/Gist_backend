@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     apple_oauth_client_id: str = ""
 
-    # AWS / S3
+    # AWS / S3 (comics only — ImageGenerator content)
     aws_region: str = "ap-south-1"
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     s3_presign_expiry_seconds: int = 300  # 5 min to complete upload
     s3_content_presign_expiry_seconds: int = 86400  # 24 hr for serving feed images
 
+    # Cloudflare R2 (posts, user uploads, avatars, shorts)
+    r2_endpoint: str = ""  # https://ACCOUNT_ID.r2.cloudflarestorage.com
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_images_bucket: str = "gist-production-south-india-images"
+    r2_videos_bucket: str = "gist-production-south-india"
+    r2_user_uploads_prefix: str = "user-uploads/"
+    r2_presign_expiry_seconds: int = 300  # 5 min for uploads
+    r2_content_presign_expiry_seconds: int = 86400  # 24 hr for serving
+    r2_music_public_base: str = ""  # optional: https://pub-XXXX.r2.dev if bucket has public access
+    r2_music_access_key_id: str = ""
+    r2_music_secret_access_key: str = ""
+
     # Push notifications (direct FCM)
     fcm_service_account_json_path: str = ""
     fcm_service_account_json: str = ""
@@ -68,6 +81,9 @@ class Settings(BaseSettings):
 
     # Comma-separated phrases for comment pre-submit moderation checks.
     comment_moderation_blocklist: str = ""
+
+    # xAI (Gist AI chat)
+    xai_api_key: str = ""
 
     @property
     def database_url(self) -> str:
