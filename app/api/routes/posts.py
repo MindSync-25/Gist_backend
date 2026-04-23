@@ -1,3 +1,4 @@
+import hashlib
 import random
 import re
 from datetime import datetime, timedelta, timezone
@@ -342,6 +343,7 @@ def _fetch_blended_feed_posts(
     limit: int,
     offset: int,
     blocked_user_ids: list[int] | None = None,
+    feed_seed: str | None = None,
 ) -> list[Post]:
     """
     Build a personalised, blended post feed:
@@ -381,18 +383,25 @@ def _fetch_blended_feed_posts(
 
     block_filter = Post.author_user_id.notin_(blocked_user_ids) if blocked_user_ids else None
 
-    # No personalisation available: plain recency
+    # No personalisation available: seeded-random order so each refresh feels different
     if not followed_user_ids and not preferred_topic_ids:
+        pool_size = min((offset + limit) * 4, 200)
         stmt = (
             select(Post)
             .where(Post.status == "published")
             .order_by(Post.published_at.desc(), Post.id.desc())
-            .limit(limit)
-            .offset(offset)
+            .limit(pool_size)
         )
         if block_filter is not None:
             stmt = stmt.where(block_filter)
-        return list(db.execute(stmt).scalars().all())
+        pool = list(db.execute(stmt).scalars().all())
+        if feed_seed:
+            seed_int = int(hashlib.md5(feed_seed.encode()).hexdigest(), 16) % (2 ** 31)
+            rng = random.Random(seed_int)
+            rng.shuffle(pool)
+        else:
+            random.shuffle(pool)
+        return pool[offset:offset + limit]
 
     need = limit + offset          # total items needed before slicing
     fetch_size = max(need * 2, 60) # generous pool per bucket
@@ -451,11 +460,17 @@ def _fetch_blended_feed_posts(
         ).scalars().all()
     )
 
+    # Keep bucket order deterministic within a feed session so offset pagination
+    # stays stable across next-page requests.
+    seed_key = f"{feed_seed or 'default'}:{viewer_user_id}"
+    seed_int = int(hashlib.md5(seed_key.encode()).hexdigest(), 16) % (2 ** 31)
+    rng = random.Random(seed_int)
+
     # Shuffle the interest pool so topics are mixed (politics/business/finance
     # appear in random order rather than grouped by topic).
-    random.shuffle(interest_posts)
+    rng.shuffle(interest_posts)
     # Shuffle followed-user posts too so one prolific author doesn't dominate.
-    random.shuffle(followed_posts)
+    rng.shuffle(followed_posts)
 
     # ---- Interleave and paginate -----------------------------------------
     merged = _interleave_feed(
@@ -533,6 +548,7 @@ def list_posts(
     author_user_id: int | None = Query(default=None, ge=1),
     viewer_user_id: int | None = Query(default=None, ge=1),
     filter: str | None = Query(default=None),
+    feed_seed: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
 ) -> list[PostOut]:
     blocked_user_ids: list[int] = []
@@ -847,18 +863,25 @@ def list_posts(
         posts = list(db.execute(stmt).scalars().all())
     elif viewer_user_id is not None:
         # Personalised blended feed (blocked filter applied inside helper)
-        posts = _fetch_blended_feed_posts(db, viewer_user_id, limit, offset, blocked_user_ids)
+        posts = _fetch_blended_feed_posts(db, viewer_user_id, limit, offset, blocked_user_ids, feed_seed)
     else:
-        # Anonymous: plain recency
-        posts = list(
+        # Anonymous: seeded-random so refresh feels different
+        pool_size = min((offset + limit) * 4, 200)
+        pool = list(
             db.execute(
                 select(Post)
                 .where(Post.status == "published")
                 .order_by(Post.published_at.desc(), Post.id.desc())
-                .limit(limit)
-                .offset(offset)
+                .limit(pool_size)
             ).scalars().all()
         )
+        if feed_seed:
+            seed_int = int(hashlib.md5(feed_seed.encode()).hexdigest(), 16) % (2 ** 31)
+            rng = random.Random(seed_int)
+            rng.shuffle(pool)
+        else:
+            random.shuffle(pool)
+        posts = pool[offset:offset + limit]
 
     if not posts:
         return []
