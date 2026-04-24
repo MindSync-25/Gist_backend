@@ -26,5 +26,6 @@ class ComicOut(BaseModel):
     comments_count: int = 0
     shares_count: int = 0
     liked_by_viewer: bool = False
+    share_token: str = ""
 
     model_config = {"from_attributes": True}

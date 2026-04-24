@@ -14,6 +14,7 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.notifications import create_notification
 from app.core.r2 import get_r2_client
+from app.core.share_token import encode_share_token
 from app.models.comic import Comic
 from app.models.comic_comment import ComicComment
 from app.models.comic_comment_reaction import ComicCommentReaction
@@ -23,7 +24,7 @@ from app.models.topic import Topic
 from app.models.user import User
 from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
 from app.schemas.comic import ComicOut
-from app.schemas.post import PostReactionIn, PostReactionOut
+from app.schemas.post import PostReactionIn, PostReactionOut, PostShareIn, PostShareOut
 
 router = APIRouter(prefix="/comics", tags=["comics"])
 SUPPORTED_COMIC_LANGUAGES = {"en", "hi", "kn", "ta", "te"}
@@ -327,6 +328,7 @@ def list_comics(
                 comments_count=metric.comments_count if metric else 0,
                 shares_count=metric.shares_count if metric else 0,
                 liked_by_viewer=comic.id in liked_comic_ids,
+                share_token=encode_share_token(comic.id, get_settings().jwt_secret, content_type="comic"),
             )
         )
     return result
@@ -613,4 +615,25 @@ def react_to_comic(
         reaction_type=payload.reaction_type,
         likes_count=metrics.likes_count,
         liked=liked,
+    )
+
+
+@router.post("/{comic_id}/shares", response_model=PostShareOut)
+def share_comic(
+    comic_id: int,
+    payload: PostShareIn,
+    db: Session = Depends(get_db),
+) -> PostShareOut:
+    _ensure_comic_exists(db, comic_id)
+
+    metrics = _get_or_create_metrics(db, comic_id)
+    metrics.shares_count += 1
+    metrics.updated_at = datetime.now(timezone.utc)
+
+    db.commit()
+
+    return PostShareOut(
+        ok=True,
+        post_id=comic_id,
+        shares_count=metrics.shares_count,
     )

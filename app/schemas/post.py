@@ -70,6 +70,7 @@ class PostOut(BaseModel):
     bookmarks_count: int = 0
     liked_by_viewer: bool = False
     bookmarked_by_viewer: bool = False
+    share_token: str = ""
 
 
 class PostCreateIn(BaseModel):

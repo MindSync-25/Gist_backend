@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.avatar_signing import build_avatar_display_url, extract_managed_user_upload_key
 from app.core.comment_moderation import moderate_comment_text
 from app.core.config import get_settings
+from app.core.share_token import encode_share_token
 from app.core.database import get_db
 from app.core.notifications import create_notification, fanout_new_post_notifications
 from app.api.deps import get_current_user
@@ -110,6 +111,11 @@ def _map_post_out(
     if author is not None:
         author_avatar_display_url, author_avatar_display_expires_at = build_avatar_display_url(author.avatar_url)
 
+    share_token = encode_share_token(post.id, get_settings().jwt_secret)
+    if post.source_type == "comic_pipeline":
+        comic_target_id = post.comic_id or post.id
+        share_token = encode_share_token(comic_target_id, get_settings().jwt_secret, content_type="comic")
+
     return PostOut(
         id=post.id,
         source_type=post.source_type,
@@ -142,6 +148,7 @@ def _map_post_out(
         bookmarks_count=metric.bookmarks_count if metric else 0,
         liked_by_viewer=liked_by_viewer,
         bookmarked_by_viewer=bookmarked_by_viewer,
+        share_token=share_token,
     )
 
 
