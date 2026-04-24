@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.api.routes.share import router as share_router
 from app.core.config import get_settings
 from app.core.database import SessionLocal, ensure_runtime_schema
 
@@ -21,6 +22,8 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+# Public HTML share pages served at /share/post/{id} (no /api/v1 prefix)
+app.include_router(share_router)
 
 _scheduler = BackgroundScheduler()
 
