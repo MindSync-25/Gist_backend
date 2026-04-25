@@ -75,8 +75,24 @@ def _resolve_image_url(image_url: str | None) -> str | None:
     from app.core.r2 import is_r2_url, presign_r2_get
     if not image_url:
         return None
-    # Already a presigned URL — return as-is
+    # If already presigned, refresh it from the underlying object URL.
+    # Older rows may store stale signatures; returning as-is causes playback failures.
     if "x-amz-signature=" in image_url.lower():
+        base_url = image_url.split("?", 1)[0]
+        if is_r2_url(base_url):
+            return presign_r2_get(base_url)
+        s3_ref = _extract_s3_bucket_and_key(base_url)
+        if s3_ref is not None:
+            bucket, key = s3_ref
+            settings = get_settings()
+            try:
+                return _s3_client().generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": bucket, "Key": key},
+                    ExpiresIn=settings.s3_content_presign_expiry_seconds,
+                )
+            except Exception:
+                return image_url
         return image_url
     # R2 URL — re-sign with fresh expiry
     if is_r2_url(image_url):
@@ -102,14 +118,22 @@ def _resolve_image_style_urls(image_style: dict | None) -> dict | None:
     """Pre-sign any R2 URLs nested inside an image_style JSON blob (e.g. music_url)."""
     if not image_style or not isinstance(image_style, dict):
         return image_style
-    music_url = image_style.get("music_url")
+    music_url = image_style.get("music_url") or image_style.get("musicUrl")
     if not music_url:
         return image_style
     resolved = _resolve_image_url(music_url)
     if resolved == music_url:
         return image_style
-    # Return a shallow copy with the re-signed URL so we don't mutate the ORM object
-    return {**image_style, "music_url": resolved}
+    # Return a shallow copy with the re-signed URL so we don't mutate the ORM object.
+    # Keep both key styles in sync for legacy rows that still use camelCase.
+    result = {**image_style}
+    if "music_url" in result:
+        result["music_url"] = resolved
+    if "musicUrl" in result:
+        result["musicUrl"] = resolved
+    if "music_url" not in result and "musicUrl" not in result:
+        result["music_url"] = resolved
+    return result
 
 
 def _resolve_media_styles_urls(media_styles: list | None) -> list | None:
@@ -171,6 +195,7 @@ def _map_post_out(
         image_aspect_ratio=float(post.image_aspect_ratio) if post.image_aspect_ratio is not None else None,
         image_style=image_style_for_out,
         media_styles=_resolve_media_styles_urls(media_styles_list),
+        video_style=post.video_style,
         format=post.format,
         visibility=post.visibility,
         status=post.status,
@@ -528,6 +553,7 @@ def _fetch_blended_feed_posts(
 def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut:
     now = datetime.now(timezone.utc)
     image_style_payload = payload.image_style.model_dump(exclude_none=True) if payload.image_style is not None else None
+    video_style_payload = payload.video_style.model_dump(exclude_none=True) if payload.video_style is not None else None
     if payload.image_url and not image_style_payload:
         # Keep style replay deterministic even for older clients that don't send image_style yet.
         image_style_payload = {
@@ -556,6 +582,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         media_urls=payload.media_urls,
         image_aspect_ratio=payload.image_aspect_ratio,
         image_style=image_style_payload,
+        video_style=video_style_payload,
         format=payload.format,
         status="published",
         published_at=now,
