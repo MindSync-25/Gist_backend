@@ -13,3 +13,4 @@ httpx==0.28.1
 firebase-admin==6.5.0
 apscheduler==3.10.4
 Pillow==11.2.1
+pydub==0.25.1

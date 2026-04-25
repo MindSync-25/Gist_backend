@@ -5,13 +5,25 @@ from pydantic import BaseModel, Field
 
 
 class ImageStylePayload(BaseModel):
-    filter: Literal["none", "warm", "cool", "dramatic", "fade"] | None = None
+    filter: Literal[
+        "none", "warm", "cool", "dramatic", "fade",
+        "clarendon", "juno", "lark", "reyes", "ludwig",
+        "aden", "perpetua", "mayfair", "hudson", "valencia",
+        "xpro", "lofi", "earlybird", "rise", "amaro",
+    ] | None = None
     frame: Literal["none", "classic", "polaroid", "neon"] | None = None
     overlay_text: str | None = Field(default=None, max_length=180)
     overlay_position: Literal["top", "center", "bottom"] | None = None
     zoom: float | None = Field(default=None, ge=1, le=2.5)
     offset_x: float | None = None
     offset_y: float | None = None
+    overlay_x: float | None = Field(default=None, ge=0, le=1)
+    overlay_y: float | None = Field(default=None, ge=0, le=1)
+    stickers: list | None = None
+    mentions: list | None = None
+    music_url: str | None = Field(default=None, max_length=500)
+    music_name: str | None = Field(default=None, max_length=100)
+    music_start_secs: float | None = Field(default=None, ge=0)
 
 
 class VideoStylePayload(BaseModel):
@@ -57,6 +69,7 @@ class PostOut(BaseModel):
     media_urls: list[str] | None = None
     image_aspect_ratio: float | None = None
     image_style: ImageStylePayload | None = None
+    media_styles: list | None = None
     video_style: VideoStylePayload | None = None
     format: str
     visibility: str
@@ -83,6 +96,7 @@ class PostCreateIn(BaseModel):
     media_urls: list[str] | None = None
     image_aspect_ratio: float | None = Field(default=None, gt=0, le=10)
     image_style: ImageStylePayload | None = None
+    media_styles: list | None = None
     video_style: VideoStylePayload | None = None
     format: str = Field(
         default="hero",

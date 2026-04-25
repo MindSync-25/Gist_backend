@@ -5,7 +5,7 @@ from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.r2 import build_r2_object_url, get_r2_client, presign_r2_get, r2_bucket_for_content_type
@@ -21,6 +21,14 @@ ALLOWED_IMAGE_TYPES = {
     "video/mp4",
     "video/quicktime",
     "video/webm",
+    # Audio — used for user-uploaded background music
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/aac",
+    "audio/wav",
+    "audio/ogg",
+    "audio/flac",
 }
 
 MAX_FILE_SIZE_BYTES = 80 * 1024 * 1024  # 80 MB
@@ -182,3 +190,132 @@ def view_upload(object_key: str = Query(..., min_length=1, max_length=1024)) -> 
             raise HTTPException(status_code=502, detail=f"Signed view failed: {exc}") from exc
 
     return RedirectResponse(url=signed_get_url, status_code=307)
+
+
+# ── Audio trim ────────────────────────────────────────────────────────────────
+
+class TrimAudioRequest(BaseModel):
+    audio_url: str
+    start_secs: float = Field(default=0, ge=0)
+    duration_secs: float = Field(gt=0, le=180)
+
+
+class TrimAudioResponse(BaseModel):
+    public_url: str
+
+
+@router.post("/trim-audio", response_model=TrimAudioResponse)
+def trim_audio(body: TrimAudioRequest) -> TrimAudioResponse:
+    """
+    Download an audio file from R2, trim it to the requested clip window,
+    re-upload the trimmed MP3, and delete the original to save storage.
+    Returns the public URL of the trimmed file.
+    """
+    import io
+
+    try:
+        from pydub import AudioSegment
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Audio processing unavailable: pydub not installed",
+        ) from exc
+
+    from app.core.r2 import extract_r2_bucket_and_key
+
+    r2_ref = extract_r2_bucket_and_key(body.audio_url)
+    if not r2_ref:
+        raise HTTPException(status_code=422, detail="audio_url must be an R2 object URL")
+
+    bucket, key = r2_ref
+
+    # Reject keys that don't belong to user-uploads (security guard)
+    settings = get_settings()
+    if not key.startswith(settings.r2_user_uploads_prefix):
+        raise HTTPException(status_code=403, detail="audio_url must point to a user upload")
+
+    client = get_r2_client()
+
+    # Download original audio from R2
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key)
+        audio_bytes = obj["Body"].read()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch audio from R2: {exc}") from exc
+
+    # Determine format from key extension
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else "mp3"
+    fmt_map = {
+        "mp3": "mp3", "m4a": "mp4", "mp4": "mp4",
+        "aac": "aac", "wav": "wav", "ogg": "ogg", "flac": "flac",
+    }
+    fmt = fmt_map.get(ext, "mp3")
+
+    # Trim
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=fmt)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not decode audio: {exc}") from exc
+
+    start_ms = int(body.start_secs * 1000)
+    end_ms = int((body.start_secs + body.duration_secs) * 1000)
+    clipped = audio[start_ms:min(end_ms, len(audio))]
+
+    # Export as MP3 (universal playback)
+    out_buf = io.BytesIO()
+    clipped.export(out_buf, format="mp3", bitrate="128k")
+    out_buf.seek(0)
+
+    # Upload trimmed clip under a new key (same prefix, _clip suffix)
+    base_key = key.rsplit(".", 1)[0] if "." in key else key
+    new_key = f"{base_key}_clip.mp3"
+    try:
+        client.put_object(
+            Bucket=bucket,
+            Key=new_key,
+            Body=out_buf.getvalue(),
+            ContentType="audio/mpeg",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to upload trimmed audio: {exc}") from exc
+
+    # Delete original to reclaim storage (best-effort)
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        pass
+
+    return TrimAudioResponse(public_url=build_r2_object_url(bucket, new_key))
+
+
+# ── Audio delete (cleanup on post cancel) ─────────────────────────────────────
+
+class DeleteAudioRequest(BaseModel):
+    audio_url: str
+
+
+@router.delete("/audio")
+def delete_audio(body: DeleteAudioRequest) -> dict:
+    """
+    Delete a user-uploaded audio file from R2.
+    Called by the client when a post is discarded so orphaned uploads are removed.
+    Only files under the user-uploads prefix may be deleted.
+    """
+    from app.core.r2 import extract_r2_bucket_and_key
+
+    r2_ref = extract_r2_bucket_and_key(body.audio_url)
+    if not r2_ref:
+        raise HTTPException(status_code=422, detail="audio_url must be an R2 object URL")
+
+    bucket, key = r2_ref
+
+    settings = get_settings()
+    if not key.startswith(settings.r2_user_uploads_prefix):
+        raise HTTPException(status_code=403, detail="audio_url must point to a user upload")
+
+    try:
+        get_r2_client().delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        pass  # best-effort — don't fail the client on cleanup errors
+
+    return {"deleted": True}

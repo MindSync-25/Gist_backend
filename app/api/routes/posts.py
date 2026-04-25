@@ -98,6 +98,37 @@ def _resolve_image_url(image_url: str | None) -> str | None:
     return image_url
 
 
+def _resolve_image_style_urls(image_style: dict | None) -> dict | None:
+    """Pre-sign any R2 URLs nested inside an image_style JSON blob (e.g. music_url)."""
+    if not image_style or not isinstance(image_style, dict):
+        return image_style
+    music_url = image_style.get("music_url")
+    if not music_url:
+        return image_style
+    resolved = _resolve_image_url(music_url)
+    if resolved == music_url:
+        return image_style
+    # Return a shallow copy with the re-signed URL so we don't mutate the ORM object
+    return {**image_style, "music_url": resolved}
+
+
+def _resolve_media_styles_urls(media_styles: list | None) -> list | None:
+    """Pre-sign music_url inside each per-image style in a media_styles array."""
+    if not media_styles:
+        return media_styles
+    result = []
+    changed = False
+    for item in media_styles:
+        if isinstance(item, dict):
+            resolved = _resolve_image_style_urls(item)
+            result.append(resolved)
+            if resolved is not item:
+                changed = True
+        else:
+            result.append(item)
+    return result if changed else media_styles
+
+
 def _map_post_out(
     post: Post,
     metric: PostMetric | None,
@@ -116,6 +147,8 @@ def _map_post_out(
         comic_target_id = post.comic_id or post.id
         share_token = encode_share_token(comic_target_id, get_settings().jwt_secret, content_type="comic")
 
+    media_styles_list = post.image_style.get("media_styles") if isinstance(post.image_style, dict) else None
+    image_style_for_out = None if media_styles_list is not None else _resolve_image_style_urls(post.image_style)
     return PostOut(
         id=post.id,
         source_type=post.source_type,
@@ -134,8 +167,10 @@ def _map_post_out(
         context=post.context,
         image_url=_resolve_image_url(post.image_url),
         video_url=_resolve_image_url(post.video_url),
+        media_urls=[u for raw in (post.media_urls or []) if isinstance(raw, str) and (u := _resolve_image_url(raw))] or None,
         image_aspect_ratio=float(post.image_aspect_ratio) if post.image_aspect_ratio is not None else None,
-        image_style=post.image_style,
+        image_style=image_style_for_out,
+        media_styles=_resolve_media_styles_urls(media_styles_list),
         format=post.format,
         visibility=post.visibility,
         status=post.status,
@@ -503,6 +538,9 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
             "offset_x": 0.0,
             "offset_y": 0.0,
         }
+    # For multi-image posts: store per-image styles in image_style JSON.
+    if payload.media_styles is not None:
+        image_style_payload = {"media_styles": payload.media_styles}
 
     post = Post(
         source_type="native",
@@ -515,6 +553,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         context=payload.context,
         image_url=payload.image_url,
         video_url=payload.video_url,
+        media_urls=payload.media_urls,
         image_aspect_ratio=payload.image_aspect_ratio,
         image_style=image_style_payload,
         format=payload.format,
