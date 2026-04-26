@@ -606,6 +606,57 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         # Never block content creation on notification fanout.
         pass
 
+    # Mention notifications from post media metadata (image_style/media_styles).
+    try:
+        mentioned_usernames: set[str] = set()
+
+        def _collect_mentions(style_obj: dict | None) -> None:
+            if not isinstance(style_obj, dict):
+                return
+            raw_mentions = style_obj.get("mentions")
+            if not isinstance(raw_mentions, list):
+                return
+            for item in raw_mentions:
+                if not isinstance(item, dict):
+                    continue
+                username = item.get("username")
+                if not isinstance(username, str):
+                    continue
+                normalized = username.strip().lstrip("@").lower()
+                if normalized:
+                    mentioned_usernames.add(normalized)
+
+        _collect_mentions(image_style_payload)
+
+        if isinstance(payload.media_styles, list):
+            for media_style in payload.media_styles:
+                _collect_mentions(media_style if isinstance(media_style, dict) else None)
+
+        if mentioned_usernames:
+            mention_users = db.execute(
+                select(User).where(
+                    User.username.in_(list(mentioned_usernames)),
+                    User.is_active.is_(True),
+                )
+            ).scalars().all()
+
+            for mu in mention_users:
+                create_notification(
+                    db,
+                    recipient_user_id=int(mu.id),
+                    actor_user_id=int(payload.author_user_id),
+                    notification_type="mention",
+                    entity_type="post",
+                    entity_id=int(post.id),
+                    payload={
+                        "kind": "post_mention",
+                        "post_id": int(post.id),
+                    },
+                )
+    except Exception:
+        # Never block post creation if mention fanout fails.
+        pass
+
     db.commit()
     db.refresh(post)
     db.refresh(metric)

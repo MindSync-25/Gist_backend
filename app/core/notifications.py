@@ -44,6 +44,12 @@ def _build_push_body(
     title = _NOTIF_TYPE_TITLES.get(notification_type, "Gist")
     actor = actor_display_name or "Someone"
 
+    mention_body = (
+        f"{actor} mentioned you in a post"
+        if payload.get("kind") == "post_mention"
+        else f"{actor} mentioned you in a comment"
+    )
+
     bodies: dict[str, str] = {
         "post_reaction": f"{actor} reacted to your post",
         "post_comment": f"{actor} commented on your post",
@@ -56,7 +62,7 @@ def _build_push_body(
         "series_update": payload.get("title", "A series you follow was updated"),  # type: ignore[arg-type]
         "system": payload.get("message", "You have a new notification"),  # type: ignore[arg-type]
         "post_bookmarked": f"{actor} bookmarked your post",
-        "mention": f"{actor} mentioned you in a comment",
+        "mention": mention_body,
         "follower_milestone": f"You reached {payload.get('count', '')} followers!",
         "voice_milestone": f"Your voice reached {payload.get('total_votes', '')} votes!",
     }
