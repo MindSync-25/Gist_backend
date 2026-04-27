@@ -20,6 +20,7 @@ from app.schemas.voice import (
     VoiceUserActivityItemOut,
     VoiceTakeDeleteOut,
     VoiceIssueCreateIn,
+    VoiceIssueUpdateIn,
     VoiceIssueOut,
     VoicePollCreateIn,
     VoicePollOut,
@@ -68,6 +69,8 @@ def _issue_to_out(issue: VoiceIssue, viewer_stance: str | None = None) -> VoiceI
         question_count=issue.question_count,
         takes_count=issue.takes_count,
         reacting_now=issue.support_count + issue.oppose_count + issue.question_count,
+        cover_image_url=issue.cover_image_url,
+        expires_at=issue.expires_at,
         created_at=issue.created_at,
         viewer_stance=viewer_stance,
     )
@@ -124,9 +127,14 @@ def get_featured_issue(
     viewer_user_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> VoiceIssueOut:
+    now = datetime.now(timezone.utc)
     issue = db.execute(
         select(VoiceIssue)
-        .where(VoiceIssue.is_featured.is_(True), VoiceIssue.status == "open")
+        .where(
+            VoiceIssue.is_featured.is_(True),
+            VoiceIssue.status == "open",
+            (VoiceIssue.expires_at.is_(None)) | (VoiceIssue.expires_at > now),
+        )
         .order_by(VoiceIssue.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -154,9 +162,14 @@ def list_issues(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[VoiceIssueOut]:
+    now = datetime.now(timezone.utc)
     stmt = (
         select(VoiceIssue)
-        .where(VoiceIssue.status == "open", VoiceIssue.is_featured.is_(False))
+        .where(
+            VoiceIssue.status == "open",
+            VoiceIssue.is_featured.is_(False),
+            (VoiceIssue.expires_at.is_(None)) | (VoiceIssue.expires_at > now),
+        )
         .order_by(VoiceIssue.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -211,11 +224,22 @@ def get_issue(
     return _issue_to_out(issue, viewer_stance)
 
 
+MAX_ISSUE_LIFETIME_DAYS = 10
+
+
 @router.post("/issues", response_model=VoiceIssueOut, status_code=201)
 def create_issue(
     body: VoiceIssueCreateIn,
     db: Session = Depends(get_db),
 ) -> VoiceIssueOut:
+    now = datetime.now(timezone.utc)
+    hard_cap = now + timedelta(days=MAX_ISSUE_LIFETIME_DAYS)
+    # Always expire: use caller's value if sooner than cap, otherwise cap
+    if body.expires_at and body.expires_at < hard_cap:
+        expires_at = body.expires_at
+    else:
+        expires_at = hard_cap
+
     issue = VoiceIssue(
         slug=_make_slug(body.title),
         title=body.title,
@@ -224,11 +248,90 @@ def create_issue(
         created_by_type="user",
         created_by_user_id=body.user_id,
         is_featured=False,
+        cover_image_url=body.cover_image_url,
+        expires_at=expires_at,
     )
     db.add(issue)
     db.commit()
     db.refresh(issue)
     return _issue_to_out(issue)
+
+
+@router.patch("/issues/{issue_id}", response_model=VoiceIssueOut)
+def update_issue(
+    issue_id: int,
+    body: VoiceIssueUpdateIn,
+    db: Session = Depends(get_db),
+) -> VoiceIssueOut:
+    issue = db.get(VoiceIssue, issue_id)
+    if not issue or issue.status == "archived":
+        raise HTTPException(status_code=404, detail="Issue not found")
+    if issue.created_by_user_id != body.user_id:
+        raise HTTPException(status_code=403, detail="You can only edit your own issues")
+
+    if body.title is not None:
+        issue.title = body.title
+    if body.context is not None:
+        issue.context = body.context
+    if body.tags is not None:
+        issue.tags = ",".join(body.tags) if body.tags else None
+    if body.is_featured is not None:
+        issue.is_featured = body.is_featured
+    if body.cover_image_url is not None:
+        issue.cover_image_url = body.cover_image_url
+    if body.expires_at is not None:
+        hard_cap = issue.created_at + timedelta(days=MAX_ISSUE_LIFETIME_DAYS)
+        issue.expires_at = min(body.expires_at, hard_cap)
+    if body.status is not None:
+        issue.status = body.status
+
+    db.commit()
+    db.refresh(issue)
+    return _issue_to_out(issue)
+
+
+@router.delete("/issues/{issue_id}", status_code=204)
+def delete_issue(
+    issue_id: int,
+    user_id: int = Query(..., gt=0),
+    db: Session = Depends(get_db),
+) -> None:
+    """Soft-delete: only the creator can delete their own issue."""
+    issue = db.get(VoiceIssue, issue_id)
+    if not issue or issue.status == "archived":
+        raise HTTPException(status_code=404, detail="Issue not found")
+    if issue.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="You can only delete your own issues")
+
+    issue.status = "archived"
+    db.commit()
+
+
+@router.post("/issues/expire", status_code=200)
+def expire_issues(db: Session = Depends(get_db)) -> dict:
+    """
+    Sweep: archive all open issues whose expires_at has passed.
+    Cascades automatically delete all stances, takes (comments) and replies
+    via DB-level ON DELETE CASCADE.
+    Call this from a cron job or Fly scheduled machine.
+    """
+    now = datetime.now(timezone.utc)
+    result = db.execute(
+        text(
+            """
+            UPDATE voice_issues
+               SET status = 'archived'
+             WHERE status = 'open'
+               AND expires_at IS NOT NULL
+               AND expires_at <= :now
+            RETURNING id
+            """
+        ),
+        {"now": now},
+    )
+    expired_ids = [row[0] for row in result.fetchall()]
+    db.commit()
+    return {"archived": len(expired_ids), "ids": expired_ids}
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +767,7 @@ def get_active_polls(
             closes_at=poll.closes_at,
             time_info=_format_time_info(poll.closes_at),
             viewer_voted_option_id=viewer_voted,
+            cover_image_url=poll.cover_image_url,
         ))
 
     return result
@@ -782,6 +886,7 @@ def create_poll(
         closes_at=poll.closes_at,
         time_info=_format_time_info(poll.closes_at),
         viewer_voted_option_id=None,
+        cover_image_url=poll.cover_image_url,
     )
 
 

@@ -19,6 +19,8 @@ class VoiceIssueOut(BaseModel):
     question_count: int
     takes_count: int
     reacting_now: int  # sum of support + oppose + question
+    cover_image_url: str | None = None
+    expires_at: datetime | None = None
     created_at: datetime
     viewer_stance: str | None = None  # populated when viewer_user_id is provided
 
@@ -32,6 +34,20 @@ class VoiceIssueCreateIn(BaseModel):
     context: str = Field(default="", max_length=1000)
     tags: list[str] = Field(default_factory=list, max_length=10)
     is_featured: bool = False
+    cover_image_url: str | None = None
+    expires_at: datetime | None = None  # e.g. now + 7 days; None = never expires
+
+
+class VoiceIssueUpdateIn(BaseModel):
+    """Partial update — all fields optional."""
+    user_id: int = Field(gt=0)  # must match created_by_user_id
+    title: str | None = Field(default=None, min_length=4, max_length=240)
+    context: str | None = Field(default=None, max_length=1000)
+    tags: list[str] | None = Field(default=None, max_length=10)
+    is_featured: bool | None = None
+    cover_image_url: str | None = None
+    expires_at: datetime | None = None
+    status: str | None = Field(default=None, pattern="^(open|closed|archived)$")
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +141,7 @@ class VoicePollOut(BaseModel):
     closes_at: datetime | None
     time_info: str  # e.g. "Closes in 2h 14m"
     viewer_voted_option_id: int | None = None  # populated when viewer has voted
+    cover_image_url: str | None = None
 
     class Config:
         from_attributes = True
@@ -136,6 +153,7 @@ class VoicePollCreateIn(BaseModel):
     options: list[str] = Field(min_length=2, max_length=4)
     closes_in_hours: int = Field(default=24, ge=1, le=168)  # 1h – 7 days
     issue_id: int | None = None
+    cover_image_url: str | None = None
 
 
 class VoicePollVoteIn(BaseModel):

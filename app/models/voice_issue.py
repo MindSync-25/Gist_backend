@@ -35,6 +35,10 @@ class VoiceIssue(Base):
     oppose_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     takes_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cover_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
