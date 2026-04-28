@@ -16,6 +16,7 @@ from app.models.voice_stance import VoiceStance
 from app.models.voice_take import VoiceTake
 from app.schemas.voice import (
     ParticipationStreamItem,
+    TopTakeOut,
     TopVoiceOut,
     VoiceUserActivityItemOut,
     VoiceTakeDeleteOut,
@@ -521,6 +522,55 @@ def list_takes(
     return result
 
 
+@router.get("/top-takes", response_model=list[TopTakeOut])
+def get_top_takes(
+    limit: int = Query(default=10, ge=1, le=30),
+    db: Session = Depends(get_db),
+) -> list[TopTakeOut]:
+    rows = db.execute(
+        select(
+            VoiceTake,
+            VoiceIssue.title.label("issue_title"),
+            User.display_name.label("author_name"),
+            User.avatar_url.label("author_avatar_url"),
+            (VoiceTake.reactions_count + VoiceTake.replies_count).label("engagement_score"),
+        )
+        .join(VoiceIssue, VoiceIssue.id == VoiceTake.issue_id)
+        .outerjoin(User, User.id == VoiceTake.user_id)
+        .where(
+            VoiceTake.status == "published",
+            VoiceTake.parent_take_id.is_(None),
+            VoiceIssue.status != "archived",
+        )
+        .order_by(
+            (VoiceTake.reactions_count + VoiceTake.replies_count).desc(),
+            VoiceTake.created_at.desc(),
+        )
+        .limit(limit)
+    ).all()
+
+    result: list[TopTakeOut] = []
+    for take, issue_title, author_name, author_avatar_url, engagement_score in rows:
+        result.append(
+            TopTakeOut(
+                take_id=int(take.id),
+                issue_id=int(take.issue_id),
+                issue_title=issue_title or "Voice",
+                author_id=int(take.user_id) if take.user_id is not None else None,
+                author_name=author_name or "Anonymous",
+                author_avatar_url=author_avatar_url,
+                stance=take.stance,
+                content=take.body,
+                reactions_count=int(take.reactions_count),
+                replies_count=int(take.replies_count),
+                engagement_score=int(engagement_score or 0),
+                created_at=take.created_at,
+            )
+        )
+
+    return result
+
+
 @router.post("/issues/{issue_id}/takes", response_model=VoiceTakeOut, status_code=201)
 def create_take(
     issue_id: int,
@@ -857,6 +907,7 @@ def create_poll(
         total_votes=0,
         closes_at=closes_at,
         issue_id=body.issue_id,
+        cover_image_url=body.cover_image_url,
     )
     db.add(poll)
     db.flush()  # get poll.id

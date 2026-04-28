@@ -181,6 +181,21 @@ class TopVoiceOut(BaseModel):
     takes_count: int
 
 
+class TopTakeOut(BaseModel):
+    take_id: int
+    issue_id: int
+    issue_title: str
+    author_id: int | None
+    author_name: str
+    author_avatar_url: str | None = None
+    stance: str | None = None
+    content: str
+    reactions_count: int
+    replies_count: int
+    engagement_score: int
+    created_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Participation stream item
 # ---------------------------------------------------------------------------
