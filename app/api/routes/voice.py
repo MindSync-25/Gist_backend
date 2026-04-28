@@ -63,6 +63,7 @@ def _issue_to_out(issue: VoiceIssue, viewer_stance: str | None = None) -> VoiceI
         context=issue.context,
         tags=_parse_tags(issue.tags),
         created_by_type=issue.created_by_type,
+        created_by_user_id=issue.created_by_user_id,
         is_featured=issue.is_featured,
         support_count=issue.support_count,
         oppose_count=issue.oppose_count,

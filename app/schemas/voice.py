@@ -13,6 +13,7 @@ class VoiceIssueOut(BaseModel):
     context: str
     tags: list[str]
     created_by_type: str
+    created_by_user_id: int | None = None
     is_featured: bool
     support_count: int
     oppose_count: int
