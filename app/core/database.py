@@ -97,6 +97,8 @@ def ensure_runtime_schema() -> None:
         # Older local schemas from 001 set voice_takes.stance as NOT NULL.
         # Voice comments can be neutral (no stance), so we normalize this at startup.
         conn.execute(text("ALTER TABLE IF EXISTS voice_takes ALTER COLUMN stance DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS voice_takes ADD COLUMN IF NOT EXISTS audio_url TEXT"))
+        conn.execute(text("ALTER TABLE IF EXISTS voice_takes ADD COLUMN IF NOT EXISTS audio_duration_sec INTEGER"))
 
         # Backfill older voice schemas that missed the slug column.
         conn.execute(text("ALTER TABLE IF EXISTS voice_issues ADD COLUMN IF NOT EXISTS slug VARCHAR(300)"))

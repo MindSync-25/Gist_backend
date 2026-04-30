@@ -81,6 +81,8 @@ class VoiceTakeReplyOut(BaseModel):
     author_avatar_url: str | None = None
     stance: str | None = None
     content: str
+    audio_url: str | None = None
+    audio_duration_sec: int | None = None
     created_at: datetime
     replies: list["VoiceTakeReplyOut"] = Field(default_factory=list)
 
@@ -95,6 +97,8 @@ class VoiceTakeOut(BaseModel):
     author_avatar_url: str | None = None
     stance: str | None
     content: str
+    audio_url: str | None = None
+    audio_duration_sec: int | None = None
     reactions_count: int
     replies_count: int
     created_at: datetime
@@ -106,8 +110,10 @@ class VoiceTakeOut(BaseModel):
 
 class VoiceTakeCreateIn(BaseModel):
     user_id: int = Field(gt=0)
-    body: str = Field(min_length=1, max_length=2000)
+    body: str = Field(default="", min_length=0, max_length=2000)
     stance: str | None = Field(default=None, pattern="^(support|oppose|question)$")
+    audio_url: str | None = Field(default=None, max_length=1024)
+    audio_duration_sec: int | None = Field(default=None, ge=1, le=600)
     parent_take_id: int | None = Field(default=None, gt=0)
     reply_to_take_id: int | None = Field(default=None, gt=0)
 

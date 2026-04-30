@@ -35,6 +35,8 @@ class VoiceTake(Base):
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
     stance: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    audio_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audio_duration_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reactions_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     replies_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="published")

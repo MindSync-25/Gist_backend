@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.notifications import create_notification
+from app.core.config import get_settings
+from app.core.r2 import extract_r2_bucket_and_key
 from app.models.user import User
 from app.models.voice_issue import VoiceIssue
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
@@ -55,6 +57,22 @@ def _parse_tags(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [t.strip() for t in raw.split(",") if t.strip()]
+
+
+def _validate_take_audio_url(audio_url: str | None) -> str | None:
+    if not audio_url:
+        return None
+
+    parsed = extract_r2_bucket_and_key(audio_url)
+    if not parsed:
+        raise HTTPException(status_code=422, detail="audio_url must be an R2 object URL")
+
+    _, key = parsed
+    settings = get_settings()
+    if not key.startswith(settings.r2_user_uploads_prefix):
+        raise HTTPException(status_code=422, detail="audio_url must point to user-uploads")
+
+    return audio_url
 
 
 def _issue_to_out(issue: VoiceIssue, viewer_stance: str | None = None) -> VoiceIssueOut:
@@ -499,6 +517,8 @@ def list_takes(
                     author_avatar_url=reply_avatar,
                     stance=row.stance,
                     content=row.body,
+                    audio_url=row.audio_url,
+                    audio_duration_sec=row.audio_duration_sec,
                     created_at=row.created_at,
                     replies=[],
                 )
@@ -513,6 +533,8 @@ def list_takes(
                 author_avatar_url=take_avatar,
                 stance=take.stance,
                 content=take.body,
+                audio_url=take.audio_url,
+                audio_duration_sec=take.audio_duration_sec,
                 reactions_count=take.reactions_count,
                 replies_count=take.replies_count,
                 created_at=take.created_at,
@@ -605,11 +627,18 @@ def create_take(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    validated_audio_url = _validate_take_audio_url(body.audio_url)
+    cleaned_body = (body.body or "").strip()
+    if not cleaned_body and not validated_audio_url:
+        raise HTTPException(status_code=422, detail="Either body or audio_url is required")
+
     take = VoiceTake(
         issue_id=issue_id,
         user_id=body.user_id,
-        body=body.body,
+        body=cleaned_body,
         stance=body.stance,
+        audio_url=validated_audio_url,
+        audio_duration_sec=body.audio_duration_sec,
         parent_take_id=root_parent_id,
     )
     db.add(take)
@@ -677,6 +706,8 @@ def create_take(
         author_avatar_url=user.avatar_url,
         stance=take.stance,
         content=take.body,
+        audio_url=take.audio_url,
+        audio_duration_sec=take.audio_duration_sec,
         reactions_count=0,
         replies_count=0,
         created_at=take.created_at,
