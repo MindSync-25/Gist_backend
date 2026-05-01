@@ -174,3 +174,17 @@ def ensure_runtime_schema() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_sponsored_campaigns_feed_lookup ON sponsored_campaigns (placement, is_active, priority, id DESC)"
             )
         )
+
+        # Per-user daily AI chat usage counter (cost control)
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_daily_usage (
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    usage_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                    chat_count INT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, usage_date)
+                )
+                """
+            )
+        )
