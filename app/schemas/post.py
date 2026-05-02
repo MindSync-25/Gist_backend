@@ -24,6 +24,7 @@ class ImageStylePayload(BaseModel):
     music_url: str | None = Field(default=None, max_length=500)
     music_name: str | None = Field(default=None, max_length=100)
     music_start_secs: float | None = Field(default=None, ge=0)
+    audio_volume: int | None = Field(default=None, ge=0, le=100)
 
 
 class VideoStylePayload(BaseModel):
