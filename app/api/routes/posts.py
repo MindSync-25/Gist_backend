@@ -452,7 +452,7 @@ def _fetch_blended_feed_posts(
 
     # No personalisation available: seeded-random order so each refresh feels different
     if not followed_user_ids and not preferred_topic_ids:
-        pool_size = min((offset + limit) * 4, 200)
+        pool_size = min((offset + limit) * 4, 500)
         stmt = (
             select(Post)
             .where(Post.status == "published")
@@ -471,7 +471,9 @@ def _fetch_blended_feed_posts(
         return pool[offset:offset + limit]
 
     need = limit + offset          # total items needed before slicing
-    fetch_size = max(need * 2, 60) # generous pool per bucket
+    # Per-bucket pool: fetch at least 200 posts so that with 1000+ follows or many
+    # topic posts the feed has genuine variety across pages and refreshes.
+    fetch_size = max(need * 4, 200)
     base = select(Post).where(Post.status == "published")
     if blocked_user_ids:
         base = base.where(Post.author_user_id.notin_(blocked_user_ids))
@@ -510,7 +512,8 @@ def _fetch_blended_feed_posts(
         )
 
     # Bucket D: discovery (non-preferred topics, non-followed authors) ------
-    discovery_fetch = max(need // 4, 5)
+    # Discovery is ~25% of the page to keep variety up without burying followed/topic posts.
+    discovery_fetch = max(need // 4, 20)
     dq = base
     if preferred_topic_ids:
         dq = dq.where(
