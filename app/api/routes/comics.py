@@ -216,8 +216,12 @@ def list_comics(
 
     preferred_categories = _viewer_preferred_comic_categories(db, viewer_user_id)
     if not preferred_categories:
-        # Keep pagination stable per seed: shuffle a bounded recency pool, then slice.
-        pool_size = min((offset + limit) * 4, 400)
+        # IMPORTANT: pool_size must be a fixed constant independent of offset.
+        # If pool_size grows with offset, the shuffle ordering changes every page →
+        # later pages repeat comics already seen on earlier pages →
+        # the frontend's hasUniqueItemsInLastPage guard kills pagination early (~65 items).
+        # Using a large fixed pool ensures the same seed always shuffles the same items.
+        pool_size = 2000
         pool = list(
             db.execute(
                 base_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(pool_size)
@@ -231,13 +235,15 @@ def list_comics(
         rows = pool[offset:offset + limit]
     else:
         # Blend: ~75% preferred categories + ~25% discovery (other categories)
-        need = limit + offset
+        # Use fixed pool sizes so the shuffle is stable across all paginated pages.
+        interest_pool_size = 1500
+        discovery_pool_size = 500
         interest_stmt = base_stmt.where(
             func.lower(func.coalesce(Comic.category, "")).in_(preferred_categories)
         )
         interest_comics = list(
             db.execute(
-                interest_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(need * 2)
+                interest_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(interest_pool_size)
             ).scalars().all()
         )
         interest_ids = {c.id for c in interest_comics}
@@ -247,14 +253,14 @@ def list_comics(
         )
         if interest_ids:
             discovery_stmt = discovery_stmt.where(Comic.id.notin_(list(interest_ids)))
-        discovery_size = max(need // 4, 3)
         discovery_comics = list(
             db.execute(
-                discovery_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(discovery_size * 2)
+                discovery_stmt.order_by(desc(Comic.generated_at), desc(Comic.id)).limit(discovery_pool_size)
             ).scalars().all()
         )
 
         # Interleave: pattern [I, I, I, D] → 75% interest, 25% discovery
+        need = interest_pool_size + discovery_pool_size
         merged: list = []
         ii = di = 0
         pattern = ['I', 'I', 'I', 'D']

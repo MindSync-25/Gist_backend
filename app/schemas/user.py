@@ -14,6 +14,7 @@ class PublicUserOut(BaseModel):
     avatar_display_expires_at: datetime | None = None
     followers_count: int = 0
     following_count: int = 0
+    mutual_count: int = 0
     is_following: bool = False
 
     model_config = {"from_attributes": True}

@@ -16,6 +16,30 @@ from app.schemas.user import FollowOut, PublicUserOut
 router = APIRouter(prefix="/users", tags=["users"])
 
 
+def _compute_mutual_count(db: Session, viewer_user_id: int | None, target_user_id: int) -> int:
+    if not viewer_user_id or viewer_user_id == target_user_id:
+        return 0
+
+    viewer_following = (
+        select(Follow.followed_user_id)
+        .where(Follow.follower_user_id == viewer_user_id)
+        .subquery()
+    )
+
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Follow)
+            .join(
+                viewer_following,
+                Follow.follower_user_id == viewer_following.c.followed_user_id,
+            )
+            .where(Follow.followed_user_id == target_user_id)
+        )
+        or 0
+    )
+
+
 @router.get("", response_model=list[PublicUserOut])
 def list_users(
     q: str = Query(default=""),
@@ -61,6 +85,8 @@ def _build_public_user_out(
             db.get(Follow, (viewer_user_id, user.id)) is not None
         )
 
+    mutual_count = _compute_mutual_count(db, viewer_user_id, user.id)
+
     avatar_display_url, avatar_display_expires_at = build_avatar_display_url(user.avatar_url)
 
     return PublicUserOut(
@@ -74,6 +100,7 @@ def _build_public_user_out(
         avatar_display_expires_at=avatar_display_expires_at,
         followers_count=followers_count,
         following_count=following_count,
+        mutual_count=mutual_count,
         is_following=is_following,
     )
 
