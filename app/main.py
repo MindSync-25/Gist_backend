@@ -4,7 +4,7 @@ import os
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from app.api.router import api_router
 from app.api.routes.share import router as share_router
@@ -60,6 +60,11 @@ def shutdown_tasks() -> None:
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": settings.app_name, "env": settings.app_env}
+
+
+@app.get("/app-ads.txt", response_class=PlainTextResponse)
+def app_ads_txt() -> str:
+    return "google.com, pub-9812277605594739, DIRECT, f08c47fec0942fa0\n"
 
 
 @app.get("/.well-known/assetlinks.json")

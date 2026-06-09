@@ -4,10 +4,12 @@ from app.models.comment import Comment
 from app.models.comment_reaction import CommentReaction
 from app.models.comic import Comic
 from app.models.follow import Follow
+from app.models.monetization import AdRevenueEvent, ContentViewEvent, MonetizationProfile, WithdrawalRequest
 from app.models.post import Post
 from app.models.post_metric import PostMetric
 from app.models.post_reaction import PostReaction
 from app.models.post_share import PostShare
+from app.models.prediction import Prediction, PredictionEstimate
 from app.models.series import Series, SeriesItem, SeriesSubscription
 from app.models.sponsored_campaign import SponsoredCampaign
 from app.models.topic import Topic
@@ -16,6 +18,7 @@ from app.models.voice_issue import VoiceIssue
 from app.models.voice_stance import VoiceStance
 from app.models.voice_take import VoiceTake
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
+from app.models.short_bookmark import ShortBookmark
 
 __all__ = [
         "Bookmark",
@@ -24,10 +27,16 @@ __all__ = [
         "CommentReaction",
         "Comic",
         "Follow",
+        "AdRevenueEvent",
+        "ContentViewEvent",
+        "MonetizationProfile",
+        "WithdrawalRequest",
         "Post",
         "PostMetric",
         "PostReaction",
         "PostShare",
+        "Prediction",
+        "PredictionEstimate",
         "Series",
         "SeriesItem",
         "SeriesSubscription",
@@ -40,4 +49,5 @@ __all__ = [
         "VoicePoll",
         "VoicePollOption",
         "VoicePollVote",
+        "ShortBookmark",
 ]

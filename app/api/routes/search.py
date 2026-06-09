@@ -111,6 +111,8 @@ def global_search(
             id=u.id,
             username=u.username,
             display_name=u.display_name,
+            account_type=u.account_type if u.account_type in {"personal", "professional"} else "personal",
+            is_verified=bool(u.is_verified),
             bio=u.bio,
             location=u.location,
             avatar_url=u.avatar_url,

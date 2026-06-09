@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -37,6 +37,7 @@ class Post(Base):
     image_style: Mapped[dict[str, object] | None] = mapped_column(JSON, nullable=True)
     format: Mapped[str] = mapped_column(String(20), nullable=False, default="hero")
     visibility: Mapped[str] = mapped_column(String(20), nullable=False, default="public")
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="published")
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

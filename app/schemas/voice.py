@@ -177,6 +177,47 @@ class VoicePollVoteOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Predictions
+# ---------------------------------------------------------------------------
+
+class PredictionOut(BaseModel):
+    id: int
+    creator_user_id: int
+    creator_name: str | None = None
+    creator_avatar_url: str | None = None
+    statement: str
+    context: str
+    topic: str | None = None
+    estimates_count: int
+    crowd_average: float | None = None
+    viewer_estimate: int | None = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PredictionCreateIn(BaseModel):
+    user_id: int = Field(gt=0)
+    statement: str = Field(min_length=4, max_length=280)
+    context: str = Field(default="", max_length=1000)
+    topic: str | None = Field(default=None, max_length=80)
+
+
+class PredictionEstimateIn(BaseModel):
+    user_id: int = Field(gt=0)
+    estimate_percent: int = Field(ge=1, le=100)
+
+
+class PredictionEstimateOut(BaseModel):
+    ok: bool
+    prediction_id: int
+    estimate_percent: int
+    estimates_count: int
+    crowd_average: float | None = None
+
+
+# ---------------------------------------------------------------------------
 # Top Voices
 # ---------------------------------------------------------------------------
 

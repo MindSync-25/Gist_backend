@@ -30,8 +30,10 @@ class ShortOut(BaseModel):
     likes_count: int = 0
     comments_count: int = 0
     shares_count: int = 0
+    bookmarks_count: int = 0
     views_count: int = 0
     liked_by_viewer: bool = False
+    bookmarked_by_viewer: bool = False
 
     @model_validator(mode="before")
     @classmethod
@@ -74,3 +76,14 @@ class ShortReactionOut(BaseModel):
     reaction_type: str
     likes_count: int
     liked: bool
+
+
+class ShortBookmarkIn(BaseModel):
+    user_id: int
+
+
+class ShortBookmarkOut(BaseModel):
+    ok: bool
+    short_id: int
+    bookmarked: bool
+    bookmarks_count: int

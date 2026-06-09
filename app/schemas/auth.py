@@ -13,6 +13,8 @@ class AuthUserOut(BaseModel):
     location: str | None = None
     avatar_url: str | None = None
     language: str | None = "en"
+    account_type: str = "personal"
+    is_verified: bool = False
     avatar_display_url: str | None = None
     avatar_display_expires_at: datetime | None = None
     google_connected: bool = False
@@ -30,6 +32,7 @@ class SignUpIn(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=2, max_length=80)
     date_of_birth: date
+    invite_token: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class SignUpRequestOtpIn(BaseModel):
@@ -38,11 +41,13 @@ class SignUpRequestOtpIn(BaseModel):
     password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(min_length=2, max_length=80)
     date_of_birth: date
+    invite_token: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class SignUpVerifyOtpIn(BaseModel):
     email: str = Field(min_length=5, max_length=255)
     otp: str = Field(min_length=6, max_length=6)
+    invite_token: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class OtpAckOut(BaseModel):
@@ -72,6 +77,7 @@ class ProfileUpdateIn(BaseModel):
     location: str | None = Field(default=None, max_length=120)
     avatar_url: str | None = Field(default=None, max_length=2048)
     language: str | None = Field(default=None, max_length=10)
+    account_type: str | None = Field(default=None, pattern="^(personal|professional)$")
     latitude: float | None = Field(default=None, ge=-90.0, le=90.0)
     longitude: float | None = Field(default=None, ge=-180.0, le=180.0)
 
@@ -114,6 +120,7 @@ class SocialSignInIn(BaseModel):
     code_verifier: str | None = Field(default=None)
     email: str | None = Field(default=None, min_length=5, max_length=255)
     display_name: str | None = Field(default=None, min_length=2, max_length=80)
+    invite_token: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class SocialConnectIn(BaseModel):

@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # xAI (Gist AI chat)
     xai_api_key: str = ""
 
+    # Protect internal ad-revenue ingestion.
+    monetization_admin_secret: str = ""
+
+    share_public_base_url: str = "https://share.gistverse.com"
+
     @property
     def database_url(self) -> str:
         if self.database_url_override:

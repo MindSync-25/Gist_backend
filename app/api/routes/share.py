@@ -1,6 +1,7 @@
 import html as _html
 import importlib
 from io import BytesIO
+from urllib.parse import quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.invites import resolve_invite_link
 from app.core.share_token import decode_share_token
 from app.models.comic import Comic
 from app.models.post import Post
@@ -25,6 +27,14 @@ _SHARE_CANONICAL_BASE = "https://share.gistverse.com"
 _SHARE_IMAGE_EXPIRY_SECONDS = 7 * 24 * 3600
 _WA_PREVIEW_MAX_DIM = 1200
 _WA_PREVIEW_TARGET_BYTES = 350 * 1024
+
+
+def _build_play_store_url(*, referrer_params: dict[str, str] | None = None) -> str:
+    if not referrer_params:
+        return _PLAY_STORE
+
+    referrer_query = urlencode(referrer_params)
+    return f"{_PLAY_STORE}&referrer={quote_plus(referrer_query)}"
 
 
 def _resolve_share_image_url(image_url: str | None) -> str | None:
@@ -174,6 +184,102 @@ _PAGE_TEMPLATE = """\
 </body>
 </html>"""
 
+_INVITE_PAGE_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>{title_esc}</title>
+    <meta name="description" content="{desc_esc}"/>
+    <meta property="og:type" content="website"/>
+    <meta property="og:site_name" content="Gist"/>
+    <meta property="og:title" content="{title_esc}"/>
+    <meta property="og:description" content="{desc_esc}"/>
+    <meta property="og:url" content="{canonical_url}"/>
+    <meta name="twitter:card" content="summary"/>
+    <meta name="twitter:title" content="{title_esc}"/>
+    <meta name="twitter:description" content="{desc_esc}"/>
+    <style>
+        *{{box-sizing:border-box;margin:0;padding:0}}
+        body{{font-family:system-ui,-apple-system,sans-serif;background:#0F172A;color:#F8FAFC;
+                    min-height:100vh;display:flex;flex-direction:column;align-items:center;
+                    justify-content:center;padding:24px}}
+        .logo{{font-size:28px;font-weight:800;margin-bottom:20px;letter-spacing:-.5px}}
+        .logo span{{color:rgb(31,198,188)}}
+        .card{{background:#1E293B;border-radius:20px;padding:32px 24px;max-width:420px;
+                        width:100%;text-align:center;border:1px solid rgba(255,255,255,.08)}}
+        .spinner{{width:42px;height:42px;border:3px solid rgba(31,198,188,.2);
+                             border-top-color:rgb(31,198,188);border-radius:50%;
+                             animation:spin .9s linear infinite;margin:0 auto 20px}}
+        @keyframes spin{{to{{transform:rotate(360deg)}}}}
+        h1{{font-size:20px;font-weight:700;margin-bottom:8px}}
+        .sub{{font-size:14px;color:#94A3B8;margin-bottom:22px;line-height:1.6}}
+        #status{{font-size:13px;color:rgb(31,198,188);margin-bottom:14px;min-height:18px}}
+        .btn{{display:block;padding:14px 18px;border-radius:12px;font-size:15px;
+                     font-weight:600;text-decoration:none;margin-bottom:10px;transition:opacity .2s}}
+        .btn:hover{{opacity:.85}}
+        .primary{{background:linear-gradient(135deg,rgb(31,198,188),rgb(45,123,248));color:#fff}}
+        .secondary{{background:rgba(255,255,255,.07);color:#F8FAFC;
+                                 border:1px solid rgba(255,255,255,.12)}}
+        hr{{border:none;border-top:1px solid rgba(255,255,255,.08);margin:14px 0}}
+    </style>
+</head>
+<body>
+    <div class="logo">gist<span>.</span></div>
+    <div class="card">
+        <div class="spinner" id="sp"></div>
+        <h1>Opening Gist&hellip;</h1>
+        <p id="status">Launching your invite</p>
+        <p class="sub">{desc_esc}</p>
+        <a href="#" class="btn primary" id="storeBtn" style="display:none">Download Gist</a>
+        <hr/>
+        <a href="https://gistverse.com" class="btn secondary">Visit Gistverse.com</a>
+    </div>
+    <script>
+    (function(){{
+        var PKG   = '{pkg}';
+        var PLAY  = '{play}';
+        var STORE = '{store}';
+        var DEEP  = 'gist://invite/{token}';
+        var ua = navigator.userAgent || '';
+        var isAndroid = /android/i.test(ua);
+        var isIOS     = /iphone|ipad|ipod/i.test(ua);
+        var btn    = document.getElementById('storeBtn');
+        var status = document.getElementById('status');
+        var sp     = document.getElementById('sp');
+
+        function showFallback(msg, href, label) {{
+            sp.style.display = 'none';
+            status.textContent = msg;
+            btn.href = href;
+            btn.textContent = label;
+            btn.style.display = 'block';
+        }}
+
+        if (isAndroid) {{
+            var intentUrl =
+                'intent://invite/{token}' +
+                '#Intent;scheme=gist;package=' + PKG +
+                ';S.browser_fallback_url=' + encodeURIComponent(PLAY) + ';end';
+            window.location.href = intentUrl;
+            setTimeout(function() {{
+                showFallback('App not found. Download Gist to accept this invite.', PLAY, 'Get Gist on Google Play');
+            }}, 2200);
+        }} else if (isIOS) {{
+            window.location.href = DEEP;
+            setTimeout(function() {{
+                showFallback('App not found. Download Gist to accept this invite.', STORE, 'Get Gist on the App Store');
+            }}, 2200);
+        }} else {{
+            sp.style.display = 'none';
+            status.textContent = 'Open this invite on your phone to continue in Gist.';
+        }}
+    }})();
+    </script>
+</body>
+</html>"""
+
 
 def _fresh_comic_image_url(comic: Comic) -> str | None:
     """Generate a fresh 7-day presigned URL from the comic's raw s3_key.
@@ -276,6 +382,50 @@ def _make_page(
         store=_APP_STORE,
         deep_link_id=deep_link_id,
     )
+
+
+def _make_invite_page(*, token: str, title: str, description: str) -> str:
+    play_store_url = _build_play_store_url(
+        referrer_params={
+            "invite_token": token,
+            "utm_source": "gist_invite",
+            "utm_medium": "share",
+            "utm_campaign": "invite",
+        }
+    )
+    return _INVITE_PAGE_TEMPLATE.format(
+        title_esc=_html.escape(title[:180]),
+        desc_esc=_html.escape(description[:200]),
+        canonical_url=_html.escape(f"{_SHARE_CANONICAL_BASE}/share/invite/{token}"),
+        pkg=_ANDROID_PACKAGE,
+        play=_html.escape(play_store_url),
+        store=_APP_STORE,
+        token=_html.escape(token),
+    )
+
+
+@router.get("/invite/{token}", response_class=HTMLResponse, include_in_schema=False)
+def share_invite_page(token: str, db: Session = Depends(get_db)) -> HTMLResponse:
+    invite = resolve_invite_link(db, token=token, record_open=False)
+    if invite is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    inviter_name = invite.get("inviter_display_name") or invite.get("inviter_username") or "Someone"
+    invite_type = invite.get("invite_type")
+    if invite_type == "post":
+        title = f"{inviter_name} shared a post on Gist"
+        description = "Open the app to view the shared post and join the conversation."
+    elif invite_type == "voice":
+        title = f"{inviter_name} shared a Voice discussion on Gist"
+        description = "Open the app to view the discussion and take part."
+    elif invite_type == "profile":
+        title = f"{inviter_name} invited you to connect on Gist"
+        description = "Open the app to view their profile and join Gist."
+    else:
+        title = f"{inviter_name} invited you to join Gist"
+        description = "Open the app to accept the invite and start exploring Gist."
+
+    return HTMLResponse(content=_make_invite_page(token=token, title=title, description=description), status_code=200)
 
 
 @router.get("/post/{token}", response_class=HTMLResponse, include_in_schema=False)

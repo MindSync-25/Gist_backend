@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ComicOut(BaseModel):
@@ -26,6 +26,18 @@ class ComicOut(BaseModel):
     comments_count: int = 0
     shares_count: int = 0
     liked_by_viewer: bool = False
+    bookmarked_by_viewer: bool = False
     share_token: str = ""
+
+
+class ComicBookmarkIn(BaseModel):
+    user_id: int = Field(gt=0)
+
+
+class ComicBookmarkOut(BaseModel):
+    ok: bool
+    comic_id: int
+    bookmarked: bool
+    bookmarks_count: int
 
     model_config = {"from_attributes": True}

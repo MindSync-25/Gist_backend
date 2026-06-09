@@ -173,16 +173,29 @@ def _map_post_out(
 
     media_styles_list = post.image_style.get("media_styles") if isinstance(post.image_style, dict) else None
     image_style_for_out = None if media_styles_list is not None else _resolve_image_style_urls(post.image_style)
+
+    # For secret posts: strip all author identity from the response so viewers
+    # cannot identify who posted. The real author_user_id is preserved in the DB.
+    is_secret = bool(getattr(post, "is_secret", False))
+    exposed_author_user_id = None if is_secret else post.author_user_id
+    exposed_author_username = None if is_secret else (author.username if author else None)
+    exposed_author_display_name = None if is_secret else (author.display_name if author else None)
+    exposed_author_is_verified = False if is_secret else bool(author.is_verified) if author else False
+    exposed_author_avatar_url = None if is_secret else (author.avatar_url if author else None)
+    exposed_avatar_display_url = None if is_secret else author_avatar_display_url
+    exposed_avatar_display_expires_at = None if is_secret else author_avatar_display_expires_at
+
     return PostOut(
         id=post.id,
         source_type=post.source_type,
         comic_id=post.comic_id,
-        author_user_id=post.author_user_id,
-        author_username=author.username if author else None,
-        author_display_name=author.display_name if author else None,
-        author_avatar_url=author.avatar_url if author else None,
-        author_avatar_display_url=author_avatar_display_url,
-        author_avatar_display_expires_at=author_avatar_display_expires_at,
+        author_user_id=exposed_author_user_id,
+        author_username=exposed_author_username,
+        author_display_name=exposed_author_display_name,
+        author_is_verified=exposed_author_is_verified,
+        author_avatar_url=exposed_author_avatar_url,
+        author_avatar_display_url=exposed_avatar_display_url,
+        author_avatar_display_expires_at=exposed_avatar_display_expires_at,
         character_id=post.character_id,
         topic_id=post.topic_id,
         series_id=post.series_id,
@@ -198,6 +211,7 @@ def _map_post_out(
         video_style=post.video_style,
         format=post.format,
         visibility=post.visibility,
+        is_secret=is_secret,
         status=post.status,
         published_at=post.published_at,
         created_at=post.created_at,
@@ -553,8 +567,30 @@ def _fetch_blended_feed_posts(
 
 
 @router.post("", response_model=PostOut, status_code=201)
-def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut:
+def create_post(
+    payload: PostCreateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PostOut:
     now = datetime.now(timezone.utc)
+    actor_user_id = int(current_user.id)
+
+    # Rate-limit anonymous secret posts: max 5 per user per 24 hours.
+    if payload.is_secret:
+        window_start = now - timedelta(hours=24)
+        secret_count = db.execute(
+            select(func.count()).select_from(Post).where(
+                Post.author_user_id == actor_user_id,
+                Post.is_secret.is_(True),
+                Post.created_at >= window_start,
+            )
+        ).scalar_one()
+        if secret_count >= 5:
+            raise HTTPException(
+                status_code=429,
+                detail="You can post at most 5 secrets per day. Try again later.",
+            )
+
     image_style_payload = payload.image_style.model_dump(exclude_none=True) if payload.image_style is not None else None
     video_style_payload = payload.video_style.model_dump(exclude_none=True) if payload.video_style is not None else None
     if payload.image_url and not image_style_payload:
@@ -573,7 +609,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
 
     post = Post(
         source_type="native",
-        author_user_id=payload.author_user_id,
+        author_user_id=actor_user_id,
         character_id=payload.character_id,
         topic_id=payload.topic_id,
         series_id=payload.series_id,
@@ -587,6 +623,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
         image_style=image_style_payload,
         video_style=video_style_payload,
         format=payload.format,
+        is_secret=payload.is_secret,
         status="published",
         published_at=now,
     )
@@ -597,14 +634,16 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
     db.add(metric)
 
     try:
-        fanout_new_post_notifications(
-            db,
-            post_id=int(post.id),
-            author_user_id=int(payload.author_user_id),
-            topic_id=payload.topic_id,
-            series_id=payload.series_id,
-            title=payload.title,
-        )
+        # Skip follower fanout for secret posts — notifying followers would reveal the author.
+        if not payload.is_secret:
+            fanout_new_post_notifications(
+                db,
+                post_id=int(post.id),
+                author_user_id=actor_user_id,
+                topic_id=payload.topic_id,
+                series_id=payload.series_id,
+                title=payload.title,
+            )
     except Exception:
         # Never block content creation on notification fanout.
         pass
@@ -647,7 +686,7 @@ def create_post(payload: PostCreateIn, db: Session = Depends(get_db)) -> PostOut
                 create_notification(
                     db,
                     recipient_user_id=int(mu.id),
-                    actor_user_id=int(payload.author_user_id),
+                    actor_user_id=actor_user_id,
                     notification_type="mention",
                     entity_type="post",
                     entity_id=int(post.id),
@@ -1229,8 +1268,10 @@ def create_comment(
     post_id: int,
     payload: CommentCreateIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentOut:
     post = _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
     moderation = moderate_comment_text(payload.body)
     if not moderation.allowed:
         raise HTTPException(status_code=422, detail=moderation.reason or "Comment violates moderation guidelines.")
@@ -1244,7 +1285,7 @@ def create_comment(
 
     comment = Comment(
         post_id=post_id,
-        user_id=payload.user_id,
+        user_id=actor_user_id,
         parent_comment_id=payload.parent_comment_id,
         body=payload.body.strip(),
         status="published",
@@ -1262,11 +1303,11 @@ def create_comment(
     db.flush()
 
     try:
-        if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+        if post.author_user_id is not None and int(post.author_user_id) != actor_user_id:
             create_notification(
                 db,
                 recipient_user_id=int(post.author_user_id),
-                actor_user_id=int(payload.user_id),
+                actor_user_id=actor_user_id,
                 notification_type="post_comment",
                 entity_type="post",
                 entity_id=int(post_id),
@@ -1280,13 +1321,13 @@ def create_comment(
         if (
             parent is not None
             and parent.user_id is not None
-            and int(parent.user_id) != int(payload.user_id)
+            and int(parent.user_id) != actor_user_id
             and int(parent.user_id) != int(post.author_user_id or -1)
         ):
             create_notification(
                 db,
                 recipient_user_id=int(parent.user_id),
-                actor_user_id=int(payload.user_id),
+                actor_user_id=actor_user_id,
                 notification_type="comment_reply",
                 entity_type="comment",
                 entity_id=int(parent.id),
@@ -1301,7 +1342,7 @@ def create_comment(
         # @mention notifications
         mentioned_usernames = re.findall(r'@(\w+)', payload.body)
         if mentioned_usernames:
-            already_notified_ids = {int(payload.user_id)}
+            already_notified_ids = {actor_user_id}
             if post.author_user_id is not None:
                 already_notified_ids.add(int(post.author_user_id))
             if parent is not None and parent.user_id is not None:
@@ -1317,7 +1358,7 @@ def create_comment(
                     create_notification(
                         db,
                         recipient_user_id=int(mu.id),
-                        actor_user_id=int(payload.user_id),
+                        actor_user_id=actor_user_id,
                         notification_type="mention",
                         entity_type="comment",
                         entity_id=int(comment.id),
@@ -1334,7 +1375,7 @@ def create_comment(
     db.commit()
     db.refresh(comment)
 
-    author = db.get(User, payload.user_id)
+    author = db.get(User, actor_user_id)
     users_by_id = {author.id: author} if author is not None else {}
     return _map_comment_out(comment, users_by_id, liked_by_viewer=False)
 
@@ -1345,8 +1386,10 @@ def react_to_comment(
     comment_id: int,
     payload: CommentReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentReactionOut:
     _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(Comment, comment_id)
     if comment is None or comment.post_id != post_id or comment.status == "deleted":
@@ -1355,7 +1398,7 @@ def react_to_comment(
     existing = db.execute(
         select(CommentReaction).where(
             CommentReaction.comment_id == comment_id,
-            CommentReaction.user_id == payload.user_id,
+            CommentReaction.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -1365,7 +1408,7 @@ def react_to_comment(
         db.add(
             CommentReaction(
                 comment_id=comment_id,
-                user_id=payload.user_id,
+                user_id=actor_user_id,
                 reaction_type=payload.reaction_type,
             )
         )
@@ -1396,16 +1439,17 @@ def react_to_comment(
 def delete_comment(
     post_id: int,
     comment_id: int,
-    user_id: int = Query(gt=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentDeleteOut:
     _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(Comment, comment_id)
     if comment is None or comment.post_id != post_id:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    if comment.user_id != user_id:
+    if comment.user_id != actor_user_id:
         raise HTTPException(status_code=403, detail="You can only delete your own comment")
 
     comments_to_delete = [comment]
@@ -1452,13 +1496,15 @@ def react_to_post(
     post_id: int,
     payload: PostReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PostReactionOut:
     post = _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
 
     existing = db.execute(
         select(PostReaction).where(
             PostReaction.post_id == post_id,
-            PostReaction.user_id == payload.user_id,
+            PostReaction.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -1469,17 +1515,17 @@ def react_to_post(
         db.add(
             PostReaction(
                 post_id=post_id,
-                user_id=payload.user_id,
+                user_id=actor_user_id,
                 reaction_type=payload.reaction_type,
             )
         )
         metrics.likes_count += 1
         try:
-            if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+            if post.author_user_id is not None and int(post.author_user_id) != actor_user_id:
                 create_notification(
                     db,
                     recipient_user_id=int(post.author_user_id),
-                    actor_user_id=int(payload.user_id),
+                    actor_user_id=actor_user_id,
                     notification_type="post_reaction",
                     entity_type="post",
                     entity_id=int(post_id),
@@ -1516,13 +1562,15 @@ def share_post(
     post_id: int,
     payload: PostShareIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PostShareOut:
     _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
 
     db.add(
         PostShare(
             post_id=post_id,
-            user_id=payload.user_id,
+            user_id=actor_user_id,
             channel=payload.channel,
         )
     )
@@ -1545,13 +1593,15 @@ def toggle_post_bookmark(
     post_id: int,
     payload: PostBookmarkIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PostBookmarkOut:
     post = _ensure_post_exists(db, post_id)
+    actor_user_id = int(current_user.id)
 
     existing = db.execute(
         select(Bookmark).where(
             Bookmark.post_id == post_id,
-            Bookmark.user_id == payload.user_id,
+            Bookmark.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -1562,16 +1612,16 @@ def toggle_post_bookmark(
         db.add(
             Bookmark(
                 post_id=post_id,
-                user_id=payload.user_id,
+                user_id=actor_user_id,
             )
         )
         metrics.bookmarks_count += 1
         try:
-            if post.author_user_id is not None and int(post.author_user_id) != int(payload.user_id):
+            if post.author_user_id is not None and int(post.author_user_id) != actor_user_id:
                 create_notification(
                     db,
                     recipient_user_id=int(post.author_user_id),
-                    actor_user_id=int(payload.user_id),
+                    actor_user_id=actor_user_id,
                     notification_type="post_bookmarked",
                     entity_type="post",
                     entity_id=int(post_id),

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, String, Text, func
+from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -21,6 +21,7 @@ class User(Base):
     google_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     apple_sub: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     language: Mapped[str] = mapped_column(String(10), nullable=False, default="en", server_default="en")
+    account_type: Mapped[str] = mapped_column(String(20), nullable=False, default="personal", server_default="personal")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -35,3 +36,6 @@ class User(Base):
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     latitude: Mapped[float | None] = mapped_column(nullable=True)
     longitude: Mapped[float | None] = mapped_column(nullable=True)
+    referred_by_user_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    referred_by_invite_link_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    invite_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

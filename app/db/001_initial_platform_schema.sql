@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS users (
     bio TEXT,
     location VARCHAR(120),
     avatar_url TEXT,
+    account_type VARCHAR(20) NOT NULL DEFAULT 'personal',
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     is_verified BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

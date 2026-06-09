@@ -7,6 +7,8 @@ class PublicUserOut(BaseModel):
     id: int
     username: str
     display_name: str
+    account_type: str = "personal"
+    is_verified: bool = False
     bio: str | None = None
     location: str | None = None
     avatar_url: str | None = None

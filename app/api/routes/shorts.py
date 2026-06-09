@@ -10,13 +10,14 @@ from app.core.comment_moderation import moderate_comment_text
 from app.core.database import get_db
 from app.core.notifications import create_notification
 from app.models.short import Short
+from app.models.short_bookmark import ShortBookmark
 from app.models.short_comment import ShortComment
 from app.models.short_comment_reaction import ShortCommentReaction
 from app.models.short_metric import ShortMetric
 from app.models.short_reaction import ShortReaction
 from app.models.user import User
 from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
-from app.schemas.short import ShortOut, ShortReactionIn, ShortReactionOut
+from app.schemas.short import ShortBookmarkIn, ShortBookmarkOut, ShortOut, ShortReactionIn, ShortReactionOut
 
 router = APIRouter(prefix="/shorts", tags=["shorts"])
 
@@ -43,8 +44,10 @@ def _attach_metrics(short: Short, db: Session, viewer_user_id: int | None = None
     obj["likes_count"] = metric.likes_count if metric else 0
     obj["comments_count"] = metric.comments_count if metric else 0
     obj["shares_count"] = metric.shares_count if metric else 0
+    obj["bookmarks_count"] = getattr(metric, "bookmarks_count", 0) if metric else 0
     obj["views_count"] = metric.views_count if metric else 0
     obj["liked_by_viewer"] = False
+    obj["bookmarked_by_viewer"] = False
     if viewer_user_id is not None:
         rxn = db.scalar(
             select(ShortReaction).where(
@@ -53,6 +56,13 @@ def _attach_metrics(short: Short, db: Session, viewer_user_id: int | None = None
             )
         )
         obj["liked_by_viewer"] = rxn is not None
+        bookmark = db.scalar(
+            select(ShortBookmark).where(
+                ShortBookmark.short_id == short.id,
+                ShortBookmark.user_id == viewer_user_id,
+            )
+        )
+        obj["bookmarked_by_viewer"] = bookmark is not None
     return obj
 
 
@@ -98,6 +108,34 @@ def list_my_shorts(
     return [_attach_metrics(s, db, current_user.id) for s in shorts]
 
 
+@router.get("/saved", response_model=list[ShortOut])
+def list_saved_shorts(
+    user_id: int = Query(..., ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[ShortOut]:
+    saved_short_ids: list[int] = list(
+        db.execute(
+            select(ShortBookmark.short_id)
+            .where(ShortBookmark.user_id == user_id)
+            .order_by(ShortBookmark.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).scalars().all()
+    )
+
+    if not saved_short_ids:
+        return []
+
+    shorts = db.execute(
+        select(Short).where(Short.id.in_(saved_short_ids))
+    ).scalars().all()
+    shorts_by_id = {short.id: short for short in shorts}
+    ordered_shorts = [shorts_by_id[sid] for sid in saved_short_ids if sid in shorts_by_id]
+    return [_attach_metrics(short, db, user_id) for short in ordered_shorts]
+
+
 @router.get("/{short_id}", response_model=ShortOut)
 def get_short(
     short_id: int,
@@ -116,14 +154,16 @@ def react_to_short(
     short_id: int,
     payload: ShortReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ShortReactionOut:
     """Toggle a reaction on a short. Repeated same reaction = unlike."""
     _short_or_404(short_id, db)
+    actor_user_id = int(current_user.id)
 
     existing = db.scalar(
         select(ShortReaction).where(
             ShortReaction.short_id == short_id,
-            ShortReaction.user_id == payload.user_id,
+            ShortReaction.user_id == actor_user_id,
         )
     )
 
@@ -133,7 +173,7 @@ def react_to_short(
     if existing is None:
         db.add(ShortReaction(
             short_id=short_id,
-            user_id=payload.user_id,
+            user_id=actor_user_id,
             reaction_type=payload.reaction_type,
         ))
         metric.likes_count += 1
@@ -153,6 +193,51 @@ def react_to_short(
         reaction_type=payload.reaction_type,
         likes_count=metric.likes_count,
         liked=liked,
+    )
+
+
+@router.post("/{short_id}/bookmarks", response_model=ShortBookmarkOut)
+def toggle_short_bookmark(
+    short_id: int,
+    payload: ShortBookmarkIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ShortBookmarkOut:
+    _short_or_404(short_id, db)
+    actor_user_id = int(current_user.id)
+
+    viewer = db.get(User, actor_user_id)
+    if viewer is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = db.execute(
+        select(ShortBookmark).where(
+            ShortBookmark.short_id == short_id,
+            ShortBookmark.user_id == actor_user_id,
+        )
+    ).scalar_one_or_none()
+
+    metric = _get_or_create_metric(db, short_id)
+    if not hasattr(metric, "bookmarks_count"):
+        raise HTTPException(status_code=500, detail="Short bookmarks are not available yet")
+
+    bookmarked = True
+    if existing is None:
+        db.add(ShortBookmark(short_id=short_id, user_id=actor_user_id))
+        metric.bookmarks_count = (metric.bookmarks_count or 0) + 1
+    else:
+        db.delete(existing)
+        metric.bookmarks_count = max(0, (metric.bookmarks_count or 0) - 1)
+        bookmarked = False
+
+    metric.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return ShortBookmarkOut(
+        ok=True,
+        short_id=short_id,
+        bookmarked=bookmarked,
+        bookmarks_count=metric.bookmarks_count or 0,
     )
 
 
@@ -242,8 +327,10 @@ def create_short_comment(
     short_id: int,
     payload: CommentCreateIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentOut:
     _short_or_404(short_id, db)
+    actor_user_id = int(current_user.id)
     moderation = moderate_comment_text(payload.body)
     if not moderation.allowed:
         raise HTTPException(status_code=422, detail=moderation.reason or "Comment violates moderation guidelines.")
@@ -256,7 +343,7 @@ def create_short_comment(
 
     comment = ShortComment(
         short_id=short_id,
-        user_id=payload.user_id,
+        user_id=actor_user_id,
         parent_comment_id=payload.parent_comment_id,
         body=payload.body.strip(),
         status="published",
@@ -274,11 +361,11 @@ def create_short_comment(
     db.flush()
 
     try:
-        if parent is not None and parent.user_id is not None and int(parent.user_id) != int(payload.user_id):
+        if parent is not None and parent.user_id is not None and int(parent.user_id) != actor_user_id:
             create_notification(
                 db,
                 recipient_user_id=int(parent.user_id),
-                actor_user_id=int(payload.user_id),
+                actor_user_id=actor_user_id,
                 notification_type="comment_reply",
                 entity_type="short_comment",
                 entity_id=int(parent.id),
@@ -294,7 +381,7 @@ def create_short_comment(
 
     db.commit()
     db.refresh(comment)
-    author = db.get(User, payload.user_id)
+    author = db.get(User, actor_user_id)
     users_by_id = {author.id: author} if author is not None else {}
     return _map_short_comment_out(short_id, comment, users_by_id, liked_by_viewer=False)
 
@@ -305,8 +392,10 @@ def react_to_short_comment(
     comment_id: int,
     payload: CommentReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentReactionOut:
     _short_or_404(short_id, db)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(ShortComment, comment_id)
     if comment is None or comment.short_id != short_id or comment.status == "deleted":
@@ -315,7 +404,7 @@ def react_to_short_comment(
     existing = db.execute(
         select(ShortCommentReaction).where(
             ShortCommentReaction.comment_id == comment_id,
-            ShortCommentReaction.user_id == payload.user_id,
+            ShortCommentReaction.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -323,16 +412,16 @@ def react_to_short_comment(
     if existing is None:
         db.add(ShortCommentReaction(
             comment_id=comment_id,
-            user_id=payload.user_id,
+            user_id=actor_user_id,
             reaction_type=payload.reaction_type,
         ))
         comment.reactions_count += 1
         try:
-            if comment.user_id is not None and int(comment.user_id) != int(payload.user_id):
+            if comment.user_id is not None and int(comment.user_id) != actor_user_id:
                 create_notification(
                     db,
                     recipient_user_id=int(comment.user_id),
-                    actor_user_id=int(payload.user_id),
+                    actor_user_id=actor_user_id,
                     notification_type="post_reaction",
                     entity_type="short_comment",
                     entity_id=int(comment_id),
@@ -370,16 +459,17 @@ def react_to_short_comment(
 def delete_short_comment(
     short_id: int,
     comment_id: int,
-    user_id: int = Query(gt=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentDeleteOut:
     _short_or_404(short_id, db)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(ShortComment, comment_id)
     if comment is None or comment.short_id != short_id:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    if comment.user_id != user_id:
+    if comment.user_id != actor_user_id:
         raise HTTPException(status_code=403, detail="You can only delete your own comment")
 
     comments_to_delete: list[ShortComment] = [comment]

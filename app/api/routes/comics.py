@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 from app.core.avatar_signing import build_avatar_display_url
 from app.core.comment_moderation import moderate_comment_text
 from app.core.config import get_settings
+from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.notifications import create_notification
 from app.core.r2 import get_r2_client
 from app.core.share_token import encode_share_token
 from app.models.comic import Comic
+from app.models.comic_bookmark import ComicBookmark
 from app.models.comic_comment import ComicComment
 from app.models.comic_comment_reaction import ComicCommentReaction
 from app.models.comic_metric import ComicMetric
@@ -23,7 +25,7 @@ from app.models.comic_reaction import ComicReaction
 from app.models.topic import Topic
 from app.models.user import User
 from app.schemas.comment import CommentCreateIn, CommentDeleteOut, CommentOut, CommentReactionIn, CommentReactionOut
-from app.schemas.comic import ComicOut
+from app.schemas.comic import ComicBookmarkIn, ComicBookmarkOut, ComicOut
 from app.schemas.post import PostReactionIn, PostReactionOut, PostShareIn, PostShareOut
 
 router = APIRouter(prefix="/comics", tags=["comics"])
@@ -202,6 +204,73 @@ def _viewer_preferred_comic_categories(db: Session, viewer_user_id: int | None) 
     return categories
 
 
+@router.get("/saved", response_model=list[ComicOut])
+def list_saved_comics(
+    user_id: int = Query(..., ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    language: str = Query(default="en"),
+    db: Session = Depends(get_db),
+) -> list[ComicOut]:
+    """Return comics that the given user has bookmarked, newest bookmark first."""
+    active_language = _normalize_language_code(language)
+
+    saved_comic_ids: list[int] = list(
+        db.execute(
+            select(ComicBookmark.comic_id)
+            .where(ComicBookmark.user_id == user_id)
+            .order_by(ComicBookmark.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).scalars().all()
+    )
+
+    if not saved_comic_ids:
+        return []
+
+    comics = db.execute(
+        select(Comic).where(Comic.id.in_(saved_comic_ids))
+    ).scalars().all()
+
+    comics_by_id = {comic.id: comic for comic in comics}
+    ordered_comics = [comics_by_id[cid] for cid in saved_comic_ids if cid in comics_by_id]
+
+    metrics = db.execute(
+        select(ComicMetric).where(ComicMetric.comic_id.in_(saved_comic_ids))
+    ).scalars().all()
+    metric_by_comic_id = {m.comic_id: m for m in metrics}
+
+    return [
+        ComicOut(
+            id=comic.id,
+            linked_post_id=None,
+            article_url=comic.article_url,
+            headline=comic.headline,
+            category=comic.category,
+            run_date=comic.run_date,
+            tone=comic.tone,
+            summary=_localized_field(_safe_localized_copy(comic.localized_copy), active_language, "summary", comic.summary),
+            banner_title=_localized_field(_safe_localized_copy(comic.localized_copy), active_language, "banner_title", comic.banner_title),
+            scene=comic.scene,
+            hero_character=comic.hero_character,
+            background=comic.background,
+            dialogue=comic.dialogue,
+            image_prompt=comic.image_prompt,
+            localized_copy=_safe_localized_copy(comic.localized_copy) or None,
+            s3_key=comic.s3_key,
+            s3_url=_fresh_url(comic.s3_key) or comic.s3_url,
+            generated_at=comic.generated_at,
+            likes_count=metric_by_comic_id[comic.id].likes_count if comic.id in metric_by_comic_id else 0,
+            comments_count=metric_by_comic_id[comic.id].comments_count if comic.id in metric_by_comic_id else 0,
+            shares_count=metric_by_comic_id[comic.id].shares_count if comic.id in metric_by_comic_id else 0,
+            liked_by_viewer=False,
+            bookmarked_by_viewer=True,
+            share_token=encode_share_token(comic.id, get_settings().jwt_secret, content_type="comic"),
+        )
+        for comic in ordered_comics
+    ]
+
+
 @router.get("", response_model=list[ComicOut])
 def list_comics(
     limit: int = Query(default=20, ge=1, le=100),
@@ -293,6 +362,7 @@ def list_comics(
     metric_by_comic_id = {metric.comic_id: metric for metric in metrics}
 
     liked_comic_ids: set[int] = set()
+    bookmarked_comic_ids: set[int] = set()
     if viewer_user_id is not None and comic_ids:
         liked_comic_ids = set(
             db.execute(
@@ -300,6 +370,14 @@ def list_comics(
                     ComicReaction.comic_id.in_(comic_ids),
                     ComicReaction.user_id == viewer_user_id,
                     ComicReaction.reaction_type == "like",
+                )
+            ).scalars().all()
+        )
+        bookmarked_comic_ids = set(
+            db.execute(
+                select(ComicBookmark.comic_id).where(
+                    ComicBookmark.comic_id.in_(comic_ids),
+                    ComicBookmark.user_id == viewer_user_id,
                 )
             ).scalars().all()
         )
@@ -334,6 +412,7 @@ def list_comics(
                 comments_count=metric.comments_count if metric else 0,
                 shares_count=metric.shares_count if metric else 0,
                 liked_by_viewer=comic.id in liked_comic_ids,
+                bookmarked_by_viewer=comic.id in bookmarked_comic_ids,
                 share_token=encode_share_token(comic.id, get_settings().jwt_secret, content_type="comic"),
             )
         )
@@ -396,8 +475,10 @@ def create_comic_comment(
     comic_id: int,
     payload: CommentCreateIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentOut:
     _ensure_comic_exists(db, comic_id)
+    actor_user_id = int(current_user.id)
     moderation = moderate_comment_text(payload.body)
     if not moderation.allowed:
         raise HTTPException(status_code=422, detail=moderation.reason or "Comment violates moderation guidelines.")
@@ -411,7 +492,7 @@ def create_comic_comment(
 
     comment = ComicComment(
         comic_id=comic_id,
-        user_id=payload.user_id,
+        user_id=actor_user_id,
         parent_comment_id=payload.parent_comment_id,
         body=payload.body.strip(),
         status="published",
@@ -429,11 +510,11 @@ def create_comic_comment(
     db.flush()
 
     try:
-        if parent is not None and parent.user_id is not None and int(parent.user_id) != int(payload.user_id):
+        if parent is not None and parent.user_id is not None and int(parent.user_id) != actor_user_id:
             create_notification(
                 db,
                 recipient_user_id=int(parent.user_id),
-                actor_user_id=int(payload.user_id),
+                actor_user_id=actor_user_id,
                 notification_type="comment_reply",
                 entity_type="comic_comment",
                 entity_id=int(parent.id),
@@ -449,7 +530,7 @@ def create_comic_comment(
 
     db.commit()
     db.refresh(comment)
-    author = db.get(User, payload.user_id)
+    author = db.get(User, actor_user_id)
     users_by_id = {author.id: author} if author is not None else {}
     return _map_comment_out(comic_id, comment, users_by_id, liked_by_viewer=False)
 
@@ -460,8 +541,10 @@ def react_to_comic_comment(
     comment_id: int,
     payload: CommentReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentReactionOut:
     _ensure_comic_exists(db, comic_id)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(ComicComment, comment_id)
     if comment is None or comment.comic_id != comic_id or comment.status == "deleted":
@@ -470,7 +553,7 @@ def react_to_comic_comment(
     existing = db.execute(
         select(ComicCommentReaction).where(
             ComicCommentReaction.comment_id == comment_id,
-            ComicCommentReaction.user_id == payload.user_id,
+            ComicCommentReaction.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -479,17 +562,17 @@ def react_to_comic_comment(
         db.add(
             ComicCommentReaction(
                 comment_id=comment_id,
-                user_id=payload.user_id,
+                user_id=actor_user_id,
                 reaction_type=payload.reaction_type,
             )
         )
         comment.reactions_count += 1
         try:
-            if comment.user_id is not None and int(comment.user_id) != int(payload.user_id):
+            if comment.user_id is not None and int(comment.user_id) != actor_user_id:
                 create_notification(
                     db,
                     recipient_user_id=int(comment.user_id),
-                    actor_user_id=int(payload.user_id),
+                    actor_user_id=actor_user_id,
                     notification_type="post_reaction",
                     entity_type="comic_comment",
                     entity_id=int(comment_id),
@@ -527,16 +610,17 @@ def react_to_comic_comment(
 def delete_comic_comment(
     comic_id: int,
     comment_id: int,
-    user_id: int = Query(gt=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> CommentDeleteOut:
     _ensure_comic_exists(db, comic_id)
+    actor_user_id = int(current_user.id)
 
     comment = db.get(ComicComment, comment_id)
     if comment is None or comment.comic_id != comic_id:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    if comment.user_id != user_id:
+    if comment.user_id != actor_user_id:
         raise HTTPException(status_code=403, detail="You can only delete your own comment")
 
     comments_to_delete = [comment]
@@ -583,13 +667,15 @@ def react_to_comic(
     comic_id: int,
     payload: PostReactionIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PostReactionOut:
     _ensure_comic_exists(db, comic_id)
+    actor_user_id = int(current_user.id)
 
     existing = db.execute(
         select(ComicReaction).where(
             ComicReaction.comic_id == comic_id,
-            ComicReaction.user_id == payload.user_id,
+            ComicReaction.user_id == actor_user_id,
         )
     ).scalar_one_or_none()
 
@@ -600,7 +686,7 @@ def react_to_comic(
         db.add(
             ComicReaction(
                 comic_id=comic_id,
-                user_id=payload.user_id,
+                user_id=actor_user_id,
                 reaction_type=payload.reaction_type,
             )
         )
@@ -629,8 +715,10 @@ def share_comic(
     comic_id: int,
     payload: PostShareIn,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PostShareOut:
     _ensure_comic_exists(db, comic_id)
+    _ = current_user
 
     metrics = _get_or_create_metrics(db, comic_id)
     metrics.shares_count += 1
@@ -642,4 +730,52 @@ def share_comic(
         ok=True,
         post_id=comic_id,
         shares_count=metrics.shares_count,
+    )
+
+
+@router.post("/{comic_id}/bookmarks", response_model=ComicBookmarkOut)
+def toggle_comic_bookmark(
+    comic_id: int,
+    payload: ComicBookmarkIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ComicBookmarkOut:
+    _ensure_comic_exists(db, comic_id)
+    actor_user_id = int(current_user.id)
+
+    viewer = db.get(User, actor_user_id)
+    if viewer is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    existing = db.execute(
+        select(ComicBookmark).where(
+            ComicBookmark.comic_id == comic_id,
+            ComicBookmark.user_id == actor_user_id,
+        )
+    ).scalar_one_or_none()
+
+    metrics = _get_or_create_metrics(db, comic_id)
+    bookmarked = True
+
+    if existing is None:
+        db.add(
+            ComicBookmark(
+                comic_id=comic_id,
+                user_id=actor_user_id,
+            )
+        )
+        metrics.bookmarks_count = (metrics.bookmarks_count or 0) + 1
+    else:
+        db.delete(existing)
+        metrics.bookmarks_count = max(0, (metrics.bookmarks_count or 0) - 1)
+        bookmarked = False
+
+    metrics.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return ComicBookmarkOut(
+        ok=True,
+        comic_id=comic_id,
+        bookmarked=bookmarked,
+        bookmarks_count=metrics.bookmarks_count or 0,
     )

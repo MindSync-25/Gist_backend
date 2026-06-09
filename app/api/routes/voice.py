@@ -12,6 +12,7 @@ from app.core.notifications import create_notification
 from app.core.config import get_settings
 from app.core.r2 import extract_r2_bucket_and_key
 from app.models.user import User
+from app.models.prediction import Prediction, PredictionEstimate
 from app.models.voice_issue import VoiceIssue
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
 from app.models.voice_stance import VoiceStance
@@ -30,6 +31,10 @@ from app.schemas.voice import (
     VoicePollOptionOut,
     VoicePollVoteIn,
     VoicePollVoteOut,
+    PredictionCreateIn,
+    PredictionEstimateIn,
+    PredictionEstimateOut,
+    PredictionOut,
     VoiceStanceIn,
     VoiceStanceOut,
     VoiceTakeCreateIn,
@@ -121,6 +126,32 @@ def _poll_options_with_pct(options: list[VoicePollOption], total_votes: int) -> 
         )
         for opt in options
     ]
+
+
+def _prediction_average(prediction: Prediction) -> float | None:
+    if prediction.estimates_count <= 0:
+        return None
+    return round(prediction.estimates_sum / prediction.estimates_count, 1)
+
+
+def _prediction_to_out(
+    prediction: Prediction,
+    creator: User | None = None,
+    viewer_estimate: int | None = None,
+) -> PredictionOut:
+    return PredictionOut(
+        id=prediction.id,
+        creator_user_id=prediction.creator_user_id,
+        creator_name=creator.display_name if creator else None,
+        creator_avatar_url=creator.avatar_url if creator else None,
+        statement=prediction.statement,
+        context=prediction.context or "",
+        topic=prediction.topic,
+        estimates_count=prediction.estimates_count,
+        crowd_average=_prediction_average(prediction),
+        viewer_estimate=viewer_estimate,
+        created_at=prediction.created_at,
+    )
 
 
 def _delete_expired_polls(db: Session) -> None:
@@ -821,7 +852,7 @@ def get_active_polls(
         .where(VoicePoll.is_active.is_(True))
         .where((VoicePoll.closes_at.is_(None)) | (VoicePoll.closes_at > datetime.now(timezone.utc)))
         .order_by(VoicePoll.created_at.desc())
-        .limit(3)
+        .limit(20)
     ).scalars().all()
 
     result: list[VoicePollOut] = []
@@ -970,6 +1001,118 @@ def create_poll(
         time_info=_format_time_info(poll.closes_at),
         viewer_voted_option_id=None,
         cover_image_url=poll.cover_image_url,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Predictions
+# ---------------------------------------------------------------------------
+
+@router.get("/predictions/active", response_model=list[PredictionOut])
+def get_active_predictions(
+    viewer_user_id: int | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> list[PredictionOut]:
+    predictions = db.execute(
+        select(Prediction)
+        .where(Prediction.is_active.is_(True))
+        .order_by(Prediction.created_at.desc())
+        .limit(limit)
+    ).scalars().all()
+
+    if not predictions:
+        return []
+
+    creator_ids = {p.creator_user_id for p in predictions}
+    creators = db.execute(select(User).where(User.id.in_(creator_ids))).scalars().all()
+    creator_map = {u.id: u for u in creators}
+
+    viewer_estimates: dict[int, int] = {}
+    if viewer_user_id:
+        rows = db.execute(
+            select(PredictionEstimate.prediction_id, PredictionEstimate.estimate_percent)
+            .where(
+                PredictionEstimate.user_id == viewer_user_id,
+                PredictionEstimate.prediction_id.in_([p.id for p in predictions]),
+            )
+        ).all()
+        viewer_estimates = {prediction_id: estimate for prediction_id, estimate in rows}
+
+    return [
+        _prediction_to_out(
+            prediction,
+            creator_map.get(prediction.creator_user_id),
+            viewer_estimates.get(prediction.id),
+        )
+        for prediction in predictions
+    ]
+
+
+@router.post("/predictions", response_model=PredictionOut, status_code=201)
+def create_prediction(
+    body: PredictionCreateIn,
+    db: Session = Depends(get_db),
+) -> PredictionOut:
+    user = db.get(User, body.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    prediction = Prediction(
+        creator_user_id=body.user_id,
+        statement=body.statement.strip(),
+        context=body.context.strip(),
+        topic=body.topic.strip() if body.topic and body.topic.strip() else None,
+        estimates_count=0,
+        estimates_sum=0,
+        is_active=True,
+    )
+    db.add(prediction)
+    db.commit()
+    db.refresh(prediction)
+
+    return _prediction_to_out(prediction, user)
+
+
+@router.post("/predictions/{prediction_id}/estimate", response_model=PredictionEstimateOut)
+def set_prediction_estimate(
+    prediction_id: int,
+    body: PredictionEstimateIn,
+    db: Session = Depends(get_db),
+) -> PredictionEstimateOut:
+    prediction = db.get(Prediction, prediction_id)
+    if not prediction or not prediction.is_active:
+        raise HTTPException(status_code=404, detail="Prediction not found")
+
+    existing = db.execute(
+        select(PredictionEstimate)
+        .where(
+            PredictionEstimate.prediction_id == prediction_id,
+            PredictionEstimate.user_id == body.user_id,
+        )
+    ).scalar_one_or_none()
+
+    if existing:
+        prediction.estimates_sum = prediction.estimates_sum - existing.estimate_percent + body.estimate_percent
+        existing.estimate_percent = body.estimate_percent
+    else:
+        db.add(PredictionEstimate(
+            prediction_id=prediction_id,
+            user_id=body.user_id,
+            estimate_percent=body.estimate_percent,
+        ))
+        prediction.estimates_count += 1
+        prediction.estimates_sum += body.estimate_percent
+
+    db.commit()
+    db.refresh(prediction)
+
+    return PredictionEstimateOut(
+        ok=True,
+        prediction_id=prediction_id,
+        estimate_percent=body.estimate_percent,
+        estimates_count=prediction.estimates_count,
+        crowd_average=_prediction_average(prediction),
     )
 
 

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.avatar_signing import build_avatar_display_url
 from app.core.database import get_db
+from app.core.invites import activate_invite_for_user
 from app.core.notifications import create_notification, send_expo_push, send_fcm_push
 from app.api.deps import get_current_user
 from app.models.follow import Follow
@@ -93,6 +94,8 @@ def _build_public_user_out(
         id=user.id,
         username=user.username,
         display_name=user.display_name,
+        account_type=user.account_type if user.account_type in {"personal", "professional"} else "personal",
+        is_verified=bool(user.is_verified),
         bio=user.bio,
         location=user.location,
         avatar_url=user.avatar_url,
@@ -328,25 +331,25 @@ _VALID_LANGUAGE_CODES = {"en", "hi", "kn", "te", "ta"}
 
 
 class OnboardingIn(BaseModel):
-    topic_slugs: list[str] = Field(min_length=3, max_length=6)
-    languages: list[str] = Field(min_length=1, max_length=3)
+    topic_slugs: list[str] = Field(default=[], max_length=6)
+    languages: list[str] = Field(default=["en"], max_length=3)
 
     @field_validator("topic_slugs")
     @classmethod
     def validate_topics(cls, v: list[str]) -> list[str]:
-        invalid = set(v) - _VALID_TOPIC_SLUGS
-        if invalid:
-            raise ValueError(f"Unknown topic slugs: {invalid}")
-        if len(v) < 3:
-            raise ValueError("Select at least 3 topics")
+        if v:
+            invalid = set(v) - _VALID_TOPIC_SLUGS
+            if invalid:
+                raise ValueError(f"Unknown topic slugs: {invalid}")
         return list(dict.fromkeys(v))  # deduplicate, preserve order
 
     @field_validator("languages")
     @classmethod
     def validate_languages(cls, v: list[str]) -> list[str]:
-        invalid = set(v) - _VALID_LANGUAGE_CODES
-        if invalid:
-            raise ValueError(f"Unknown language codes: {invalid}")
+        if v:
+            invalid = set(v) - _VALID_LANGUAGE_CODES
+            if invalid:
+                raise ValueError(f"Unknown language codes: {invalid}")
         result = ["en"] + [lang for lang in v if lang != "en"]  # ensure en is first
         return list(dict.fromkeys(result))[:3]  # max 3
 
@@ -361,4 +364,6 @@ def complete_onboarding(
     current_user.preferred_topic_slugs = body.topic_slugs
     current_user.preferred_languages = body.languages
     current_user.onboarding_completed = True
+    db.flush()
+    activate_invite_for_user(db, user_id=int(current_user.id))
     db.commit()

@@ -12,6 +12,7 @@ from app.core.avatar_signing import build_avatar_display_url, extract_managed_us
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.emailer import send_otp_email
+from app.core.invites import claim_invite_for_user
 from app.core.security import (
     create_access_token,
     create_otp_code,
@@ -199,9 +200,9 @@ def sign_up_request_otp(payload: SignUpRequestOtpIn, db: Session = Depends(get_d
         text(
             """
             INSERT INTO auth_signup_otps
-                (email, username, display_name, date_of_birth, password_hash, otp_hash, expires_at)
+                (email, username, display_name, date_of_birth, password_hash, otp_hash, expires_at, invite_token)
             VALUES
-                (:email, :username, :display_name, :date_of_birth, :password_hash, :otp_hash, :expires_at)
+                (:email, :username, :display_name, :date_of_birth, :password_hash, :otp_hash, :expires_at, :invite_token)
             """
         ),
         {
@@ -212,6 +213,7 @@ def sign_up_request_otp(payload: SignUpRequestOtpIn, db: Session = Depends(get_d
             "password_hash": hash_password(payload.password),
             "otp_hash": otp_hash,
             "expires_at": expires_at,
+            "invite_token": payload.invite_token.strip() if payload.invite_token else None,
         },
     )
     db.commit()
@@ -233,7 +235,7 @@ def sign_up_verify_otp(payload: SignUpVerifyOtpIn, db: Session = Depends(get_db)
     record = db.execute(
         text(
             """
-            SELECT id, email, username, display_name, date_of_birth, password_hash, otp_hash
+            SELECT id, email, username, display_name, date_of_birth, password_hash, otp_hash, invite_token
             FROM auth_signup_otps
             WHERE email = :email
               AND consumed_at IS NULL
@@ -261,6 +263,11 @@ def sign_up_verify_otp(payload: SignUpVerifyOtpIn, db: Session = Depends(get_db)
     )
     db.add(user)
     db.flush()
+    claim_invite_for_user(
+        db,
+        invite_token=payload.invite_token or (str(record["invite_token"]) if record.get("invite_token") else None),
+        user_id=int(user.id),
+    )
 
     db.execute(
         text("UPDATE auth_signup_otps SET consumed_at = :now WHERE id = :id"),
@@ -287,6 +294,8 @@ def sign_up(payload: SignUpIn, db: Session = Depends(get_db)) -> AuthTokenOut:
         is_verified=False,
     )
     db.add(user)
+    db.flush()
+    claim_invite_for_user(db, invite_token=payload.invite_token, user_id=int(user.id))
     db.commit()
     db.refresh(user)
 
@@ -366,6 +375,8 @@ def social_sign_in(payload: SocialSignInIn, db: Session = Depends(get_db)) -> Au
         )
         _set_social_sub(user, identity.provider, identity.provider_sub)
         db.add(user)
+        db.flush()
+        claim_invite_for_user(db, invite_token=payload.invite_token, user_id=int(user.id))
     else:
         _set_social_sub(user, identity.provider, identity.provider_sub)
         if not user.is_verified and identity.email_verified:
@@ -563,6 +574,10 @@ def update_me(
     if "language" in updates:
         language = updates["language"]
         current_user.language = (language.strip() or "en") if isinstance(language, str) else "en"
+
+    if "account_type" in updates:
+        account_type = updates["account_type"]
+        current_user.account_type = account_type if account_type in {"personal", "professional"} else "personal"
 
     if "avatar_url" in updates:
         avatar_url = updates["avatar_url"]

@@ -48,15 +48,22 @@ def ensure_runtime_schema() -> None:
         conn.execute(text("SET LOCAL statement_timeout = '10s'"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS location VARCHAR(120)"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS language VARCHAR(10) NOT NULL DEFAULT 'en'"))
+        conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS account_type VARCHAR(20) NOT NULL DEFAULT 'personal'"))
+        conn.execute(text("UPDATE users SET account_type = 'personal' WHERE account_type IS NULL OR account_type NOT IN ('personal', 'professional')"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS date_of_birth DATE"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS expo_push_token TEXT"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS fcm_push_token TEXT"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS google_sub VARCHAR(255)"))
         conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS apple_sub VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS referred_by_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL"))
+        conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS referred_by_invite_link_id BIGINT"))
+        conn.execute(text("ALTER TABLE IF EXISTS users ADD COLUMN IF NOT EXISTS invite_activated_at TIMESTAMPTZ"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_expo_push_token ON users (expo_push_token) WHERE expo_push_token IS NOT NULL"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_fcm_push_token ON users (fcm_push_token) WHERE fcm_push_token IS NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_google_sub ON users (google_sub) WHERE google_sub IS NOT NULL"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_users_apple_sub ON users (apple_sub) WHERE apple_sub IS NOT NULL"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_referred_by_user ON users (referred_by_user_id) WHERE referred_by_user_id IS NOT NULL"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_users_referred_by_invite ON users (referred_by_invite_link_id) WHERE referred_by_invite_link_id IS NOT NULL"))
 
         conn.execute(
             text(
@@ -77,6 +84,7 @@ def ensure_runtime_schema() -> None:
             )
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_auth_signup_otps_email ON auth_signup_otps (email, created_at DESC)"))
+        conn.execute(text("ALTER TABLE IF EXISTS auth_signup_otps ADD COLUMN IF NOT EXISTS invite_token VARCHAR(120)"))
 
         conn.execute(
             text(
@@ -94,6 +102,85 @@ def ensure_runtime_schema() -> None:
             )
         )
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_auth_password_reset_otps_email ON auth_password_reset_otps (email, created_at DESC)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS invite_links (
+                    id BIGSERIAL PRIMARY KEY,
+                    inviter_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token VARCHAR(120) NOT NULL UNIQUE,
+                    invite_type VARCHAR(30) NOT NULL DEFAULT 'generic',
+                    target_entity_type VARCHAR(30),
+                    target_entity_id BIGINT,
+                    channel VARCHAR(30) NOT NULL DEFAULT 'native_share',
+                    opens_count INT NOT NULL DEFAULT 0,
+                    last_opened_at TIMESTAMPTZ,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CHECK (invite_type IN ('generic', 'profile', 'post', 'voice')),
+                    CHECK (channel IN ('native_share', 'copy_link', 'external_social', 'dm'))
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_invite_links_inviter ON invite_links (inviter_user_id, created_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_invite_links_target ON invite_links (target_entity_type, target_entity_id)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS invite_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    invite_link_id BIGINT NOT NULL REFERENCES invite_links(id) ON DELETE CASCADE,
+                    event_type VARCHAR(20) NOT NULL,
+                    actor_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                    subject_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CHECK (event_type IN ('open', 'signup', 'activate'))
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_invite_events_link ON invite_events (invite_link_id, event_type, created_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_invite_events_subject ON invite_events (subject_user_id, event_type, created_at DESC) WHERE subject_user_id IS NOT NULL"))
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS predictions (
+                    id BIGSERIAL PRIMARY KEY,
+                    creator_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    statement VARCHAR(280) NOT NULL,
+                    context TEXT NOT NULL DEFAULT '',
+                    topic VARCHAR(80),
+                    estimates_count INT NOT NULL DEFAULT 0,
+                    estimates_sum INT NOT NULL DEFAULT 0,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_predictions_active_created ON predictions (is_active, created_at DESC)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS prediction_estimates (
+                    id BIGSERIAL PRIMARY KEY,
+                    prediction_id BIGINT NOT NULL REFERENCES predictions(id) ON DELETE CASCADE,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    estimate_percent INT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_prediction_estimates_prediction_user UNIQUE (prediction_id, user_id),
+                    CONSTRAINT ck_prediction_estimates_percent CHECK (estimate_percent >= 1 AND estimate_percent <= 100)
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_prediction_estimates_user ON prediction_estimates (user_id, updated_at DESC)"))
         # Older local schemas from 001 set voice_takes.stance as NOT NULL.
         # Voice comments can be neutral (no stance), so we normalize this at startup.
         conn.execute(text("ALTER TABLE IF EXISTS voice_takes ALTER COLUMN stance DROP NOT NULL"))
@@ -174,6 +261,85 @@ def ensure_runtime_schema() -> None:
                 "CREATE INDEX IF NOT EXISTS idx_sponsored_campaigns_feed_lookup ON sponsored_campaigns (placement, is_active, priority, id DESC)"
             )
         )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS monetization_profiles (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    monetization_unlocked_at TIMESTAMPTZ,
+                    wallet_balance_cents INT NOT NULL DEFAULT 0,
+                    total_earned_cents INT NOT NULL DEFAULT 0,
+                    total_withdrawn_cents INT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS content_view_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    content_type VARCHAR(20) NOT NULL,
+                    content_id BIGINT NOT NULL,
+                    owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    viewer_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+                    viewed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    source VARCHAR(40),
+                    session_key VARCHAR(120),
+                    CONSTRAINT ck_content_view_events_type CHECK (content_type IN ('post', 'short', 'comic'))
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_content_view_events_owner_viewed ON content_view_events (owner_user_id, viewed_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_content_view_events_content_viewed ON content_view_events (content_type, content_id, viewed_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_content_view_events_viewer_viewed ON content_view_events (viewer_user_id, viewed_at DESC) WHERE viewer_user_id IS NOT NULL"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS ad_revenue_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    content_type VARCHAR(20) NOT NULL,
+                    content_id BIGINT NOT NULL,
+                    owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    gross_revenue_cents INT NOT NULL,
+                    creator_share_cents INT NOT NULL DEFAULT 0,
+                    gist_share_cents INT NOT NULL DEFAULT 0,
+                    eligible_at_event BOOLEAN NOT NULL DEFAULT FALSE,
+                    is_video_content BOOLEAN NOT NULL DEFAULT FALSE,
+                    revenue_source VARCHAR(40) NOT NULL DEFAULT 'ad_network',
+                    external_event_id VARCHAR(120),
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ck_ad_revenue_events_type CHECK (content_type IN ('post', 'short', 'comic'))
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_ad_revenue_events_external_event_id ON ad_revenue_events (external_event_id) WHERE external_event_id IS NOT NULL"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_ad_revenue_events_owner_occurred ON ad_revenue_events (owner_user_id, occurred_at DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_ad_revenue_events_content_occurred ON ad_revenue_events (content_type, content_id, occurred_at DESC)"))
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS withdrawal_requests (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    amount_cents INT NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    payout_method VARCHAR(40),
+                    payout_note TEXT,
+                    requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT ck_withdrawal_requests_status CHECK (status IN ('pending', 'approved', 'paid', 'rejected', 'cancelled'))
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_user_requested ON withdrawal_requests (user_id, requested_at DESC)"))
 
         # Per-user daily AI chat usage counter (cost control)
         conn.execute(

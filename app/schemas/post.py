@@ -56,6 +56,7 @@ class PostOut(BaseModel):
     author_user_id: int | None = None
     author_username: str | None = None
     author_display_name: str | None = None
+    author_is_verified: bool = False
     author_avatar_url: str | None = None
     author_avatar_display_url: str | None = None
     author_avatar_display_expires_at: datetime | None = None
@@ -74,6 +75,7 @@ class PostOut(BaseModel):
     video_style: VideoStylePayload | None = None
     format: str
     visibility: str
+    is_secret: bool = False
     status: str
     published_at: datetime
     created_at: datetime
@@ -104,6 +106,7 @@ class PostCreateIn(BaseModel):
         pattern="^(hero|conversation|editorial|floating|magazine|immersive|x-thread)$",
     )
     visibility: str = Field(default="public", pattern="^(public|followers_only)$")
+    is_secret: bool = False
     character_id: int | None = Field(default=None, gt=0)
     topic_id: int | None = Field(default=None, gt=0)
     series_id: int | None = Field(default=None, gt=0)

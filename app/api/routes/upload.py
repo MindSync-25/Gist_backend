@@ -3,12 +3,14 @@ import uuid
 from datetime import date
 from functools import lru_cache
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from app.api.deps import get_current_user
 from app.core.config import get_settings
 from app.core.r2 import build_r2_object_url, get_r2_client, presign_r2_get, r2_bucket_for_content_type
+from app.models.user import User
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
@@ -77,11 +79,20 @@ def _validate_user_upload_key(object_key: str) -> str:
     return normalized_key
 
 
+def _ensure_owned_user_upload_key(object_key: str, user_id: int) -> str:
+    normalized_key = _validate_user_upload_key(object_key)
+    owner_marker = f"/user-{user_id}/"
+    if owner_marker not in f"/{normalized_key}":
+        raise HTTPException(status_code=403, detail="Upload does not belong to current user")
+    return normalized_key
+
+
 @router.get("/presign", response_model=PresignResponse)
 def presign_upload(
     filename: str = Query(..., min_length=1, max_length=200),
     content_type: str = Query(..., min_length=1, max_length=100),
-    user_id: int = Query(..., ge=1),
+    user_id: int | None = Query(default=None, ge=1),
+    current_user: User = Depends(get_current_user),
 ) -> PresignResponse:
     """
     Issue a short-lived presigned PUT URL so the client can upload directly to R2.
@@ -98,7 +109,7 @@ def presign_upload(
         )
 
     settings = get_settings()
-    object_key = _build_object_key(content_type, user_id)
+    object_key = _build_object_key(content_type, int(current_user.id))
     bucket = r2_bucket_for_content_type(content_type)
 
     try:
@@ -128,7 +139,8 @@ async def proxy_upload(
     request: Request,
     filename: str = Query(..., min_length=1, max_length=200),
     content_type: str = Query(..., min_length=1, max_length=100),
-    user_id: int = Query(..., ge=1),
+    user_id: int | None = Query(default=None, ge=1),
+    current_user: User = Depends(get_current_user),
 ) -> ProxyUploadResponse:
     """Fallback upload path when browser-to-R2 PUT fails."""
     if content_type not in ALLOWED_IMAGE_TYPES:
@@ -145,7 +157,7 @@ async def proxy_upload(
     if len(body) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status_code=413, detail=f"Max upload size is {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB")
 
-    object_key = _build_object_key(content_type, user_id)
+    object_key = _build_object_key(content_type, int(current_user.id))
     bucket = r2_bucket_for_content_type(content_type)
 
     try:
@@ -205,7 +217,10 @@ class TrimAudioResponse(BaseModel):
 
 
 @router.post("/trim-audio", response_model=TrimAudioResponse)
-def trim_audio(body: TrimAudioRequest) -> TrimAudioResponse:
+def trim_audio(
+    body: TrimAudioRequest,
+    current_user: User = Depends(get_current_user),
+) -> TrimAudioResponse:
     """
     Download an audio file from R2, trim it to the requested clip window,
     re-upload the trimmed MP3, and delete the original to save storage.
@@ -231,8 +246,7 @@ def trim_audio(body: TrimAudioRequest) -> TrimAudioResponse:
 
     # Reject keys that don't belong to user-uploads (security guard)
     settings = get_settings()
-    if not key.startswith(settings.r2_user_uploads_prefix):
-        raise HTTPException(status_code=403, detail="audio_url must point to a user upload")
+    _ensure_owned_user_upload_key(key, int(current_user.id))
 
     client = get_r2_client()
 
@@ -295,7 +309,10 @@ class DeleteAudioRequest(BaseModel):
 
 
 @router.delete("/audio")
-def delete_audio(body: DeleteAudioRequest) -> dict:
+def delete_audio(
+    body: DeleteAudioRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict:
     """
     Delete a user-uploaded audio file from R2.
     Called by the client when a post is discarded so orphaned uploads are removed.
@@ -309,9 +326,7 @@ def delete_audio(body: DeleteAudioRequest) -> dict:
 
     bucket, key = r2_ref
 
-    settings = get_settings()
-    if not key.startswith(settings.r2_user_uploads_prefix):
-        raise HTTPException(status_code=403, detail="audio_url must point to a user upload")
+    _ensure_owned_user_upload_key(key, int(current_user.id))
 
     try:
         get_r2_client().delete_object(Bucket=bucket, Key=key)
