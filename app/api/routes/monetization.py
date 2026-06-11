@@ -18,6 +18,7 @@ from app.schemas.monetization import (
     ContentViewsIn,
     ContentViewsOut,
     MonetizationSummaryOut,
+    WithdrawalAdminUpdateIn,
     WithdrawalRequestIn,
     WithdrawalRequestOut,
 )
@@ -130,6 +131,28 @@ def _to_withdrawal_out(item: WithdrawalRequest) -> WithdrawalRequestOut:
     )
 
 
+def _assert_withdrawal_transition(current_status: str, new_status: str) -> None:
+    terminal = {"paid", "rejected", "cancelled"}
+    if current_status in terminal and current_status != new_status:
+        raise HTTPException(status_code=400, detail=f"Withdrawal already in terminal state: {current_status}")
+
+    if new_status == "approved" and current_status not in {"pending", "cancelled"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending or cancelled withdrawals can be approved",
+        )
+    if new_status == "paid" and current_status not in {"pending", "approved"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending or approved withdrawals can be marked as paid",
+        )
+    if new_status in {"rejected", "cancelled"} and current_status not in {"pending", "approved"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only pending or approved withdrawals can be rejected or cancelled",
+        )
+
+
 def _assert_revenue_ingest_allowed(admin_secret: str | None) -> None:
     expected = get_settings().monetization_admin_secret.strip()
     if expected and admin_secret == expected:
@@ -195,6 +218,8 @@ def record_content_views(
     for item in payload.views:
         owner_user_id, is_video = _resolve_content_owner_and_video(db, item.content_type, item.content_id)
         if owner_user_id is None:
+            continue
+        if owner_user_id == viewer_user_id:
             continue
         if not is_video:
             continue
@@ -301,6 +326,50 @@ def request_withdrawal(
         payout_note=payload.payout_note,
     )
     db.add(profile)
+    db.add(withdrawal)
+    db.commit()
+    db.refresh(withdrawal)
+    return _to_withdrawal_out(withdrawal)
+
+
+@router.patch("/admin/withdrawals/{withdrawal_id}", response_model=WithdrawalRequestOut)
+def moderate_withdrawal(
+    withdrawal_id: int,
+    payload: WithdrawalAdminUpdateIn,
+    admin_secret: str | None = Header(default=None, alias="X-Monetization-Admin-Secret"),
+    db: Session = Depends(get_db),
+) -> WithdrawalRequestOut:
+    _assert_revenue_ingest_allowed(admin_secret)
+    if withdrawal_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid withdrawal id")
+    if payload.status not in {"approved", "paid", "rejected", "cancelled"}:
+        raise HTTPException(status_code=400, detail="Unsupported withdrawal status")
+
+    withdrawal = db.get(WithdrawalRequest, withdrawal_id)
+    if withdrawal is None:
+        raise HTTPException(status_code=404, detail="Withdrawal request not found")
+
+    if payload.payout_method is not None:
+        withdrawal.payout_method = payload.payout_method
+    if payload.payout_note is not None:
+        withdrawal.payout_note = payload.payout_note
+
+    _assert_withdrawal_transition(withdrawal.status, payload.status)
+    if payload.status == "approved":
+        withdrawal.status = "approved"
+    elif payload.status == "paid":
+        if withdrawal.status == "paid":
+            raise HTTPException(status_code=400, detail="Withdrawal already marked as paid")
+        # Move funds from pending wallet hold to paid history.
+        profile = _get_or_create_profile(db, withdrawal.user_id)
+        profile.total_withdrawn_cents += withdrawal.amount_cents
+        withdrawal.status = "paid"
+    elif payload.status in {"rejected", "cancelled"}:
+        if withdrawal.status != payload.status:
+            # Refund the reserved balance if not already returned.
+            profile = _get_or_create_profile(db, withdrawal.user_id)
+            profile.wallet_balance_cents += withdrawal.amount_cents
+            withdrawal.status = payload.status
     db.add(withdrawal)
     db.commit()
     db.refresh(withdrawal)

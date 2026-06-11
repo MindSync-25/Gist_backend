@@ -64,6 +64,12 @@ class WithdrawalRequestOut(BaseModel):
     updated_at: datetime
 
 
+class WithdrawalAdminUpdateIn(BaseModel):
+    status: str = Field(..., pattern="^(approved|paid|rejected|cancelled)$")
+    payout_method: str | None = Field(default=None, max_length=40)
+    payout_note: str | None = Field(default=None, max_length=500)
+
+
 class MonetizationSummaryOut(BaseModel):
     user_id: int
     threshold_views: int = 100000

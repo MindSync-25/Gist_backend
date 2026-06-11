@@ -4,6 +4,8 @@ from app.models.comment import Comment
 from app.models.comment_reaction import CommentReaction
 from app.models.comic import Comic
 from app.models.follow import Follow
+from app.models.gist_coin import GistCoinTransaction, GistCoinWallet, GistTipTransaction
+from app.models.gist_coin import GistCoinTopUpRequest
 from app.models.monetization import AdRevenueEvent, ContentViewEvent, MonetizationProfile, WithdrawalRequest
 from app.models.post import Post
 from app.models.post_metric import PostMetric
@@ -27,6 +29,10 @@ __all__ = [
         "CommentReaction",
         "Comic",
         "Follow",
+        "GistCoinTransaction",
+        "GistCoinWallet",
+        "GistTipTransaction",
+        "GistCoinTopUpRequest",
         "AdRevenueEvent",
         "ContentViewEvent",
         "MonetizationProfile",
