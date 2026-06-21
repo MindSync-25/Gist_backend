@@ -81,6 +81,23 @@ class TopUpRequestIn(BaseModel):
     note: str | None = Field(default=None, max_length=240)
 
 
+class StripeCheckoutSessionCreateIn(BaseModel):
+    amount_coins: int = Field(gt=0, le=100_000_000)
+    source: str | None = Field(default="stripe", max_length=32)
+    success_url: str | None = Field(default=None, max_length=500)
+    cancel_url: str | None = Field(default=None, max_length=500)
+    note: str | None = Field(default=None, max_length=240)
+
+
+class StripeCheckoutSessionOut(BaseModel):
+    top_up_request_id: int
+    amount_coins: int
+    amount_usd_cents: int
+    session_id: str
+    session_url: str
+    provider_reference_id: str
+
+
 class TopUpRequestOut(BaseModel):
     id: int
     user_id: int

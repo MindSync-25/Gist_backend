@@ -88,6 +88,12 @@ class Settings(BaseSettings):
     # Protect internal ad-revenue ingestion.
     monetization_admin_secret: str = ""
 
+    # Stripe purchases for GIST Coins.
+    stripe_secret_key: str = ""
+    stripe_publishable_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_callback_base_url: str = ""
+
     share_public_base_url: str = "https://share.gistverse.com"
 
     @property

@@ -80,7 +80,10 @@ def _validate_take_audio_url(audio_url: str | None) -> str | None:
     return audio_url
 
 
-def _issue_to_out(issue: VoiceIssue, viewer_stance: str | None = None) -> VoiceIssueOut:
+def _issue_to_out(
+    issue: VoiceIssue,
+    viewer_stance: str | None = None,
+) -> VoiceIssueOut:
     return VoiceIssueOut(
         id=issue.id,
         title=issue.title,
@@ -305,6 +308,7 @@ def create_issue(
     db.add(issue)
     db.commit()
     db.refresh(issue)
+
     return _issue_to_out(issue)
 
 

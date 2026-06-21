@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+import stripe
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
@@ -11,9 +12,11 @@ from app.models.short import Short
 from app.models.user import User
 from app.schemas.gist_coin import (
     CoinGrantIn,
+    StripeCheckoutSessionCreateIn,
     CoinTopUpIn,
     GistCoinTransactionOut,
     GistCoinWalletOut,
+    StripeCheckoutSessionOut,
     TopUpRequestAdminUpdateIn,
     TopUpRequestIn,
     TopUpRequestOut,
@@ -127,6 +130,164 @@ def _apply_approved_top_up(db: Session, top_up_request: GistCoinTopUpRequest) ->
             note=top_up_request.note,
         )
     )
+
+
+def _assert_stripe_setup() -> None:
+    settings = get_settings()
+    if not settings.stripe_secret_key.strip():
+        raise HTTPException(status_code=500, detail="Stripe is not configured")
+
+
+def _assert_stripe_webhook_secret() -> None:
+    settings = get_settings()
+    if not settings.stripe_webhook_secret.strip():
+        raise HTTPException(status_code=500, detail="Stripe webhook secret is not configured")
+
+
+def _stripe_callback_base() -> str:
+    settings = get_settings()
+    base = settings.stripe_callback_base_url.strip().rstrip("/")
+    if base:
+        return base
+    return "https://gist-backend.fly.dev"
+
+
+def _resolve_top_up_request_by_session(db: Session, session_id: str) -> GistCoinTopUpRequest | None:
+    request_row = db.execute(
+        select(GistCoinTopUpRequest).where(GistCoinTopUpRequest.provider_reference_id == session_id)
+    ).scalar_one_or_none()
+    return request_row
+
+
+def _apply_stripe_top_up_success(db: Session, request_row: GistCoinTopUpRequest) -> None:
+    if request_row.status == "approved":
+        return
+    _apply_approved_top_up(db, request_row)
+    request_row.status = "approved"
+    db.add(request_row)
+
+
+@router.post("/top-up-sessions", response_model=StripeCheckoutSessionOut, status_code=201)
+def create_top_up_checkout_session(
+    payload: StripeCheckoutSessionCreateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StripeCheckoutSessionOut:
+    _assert_stripe_setup()
+    settings = get_settings()
+    user_id = int(current_user.id)
+
+    request_row = GistCoinTopUpRequest(
+        user_id=user_id,
+        amount_coins=payload.amount_coins,
+        source=(payload.source or "stripe").strip()[:32] or "stripe",
+        note=payload.note,
+    )
+    db.add(request_row)
+    db.flush()
+
+    stripe.api_key = settings.stripe_secret_key.strip()
+    callback_base = _stripe_callback_base()
+    success_url = (payload.success_url or f"{callback_base}/coins").strip() or f"{callback_base}/coins"
+    cancel_url = (payload.cancel_url or f"{callback_base}/coins").strip() or f"{callback_base}/coins"
+
+    try:
+        session = stripe.checkout.Session.create(
+            mode="payment",
+            client_reference_id=str(request_row.id),
+            customer_email=getattr(current_user, "email", None),
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {
+                            "name": "GIST Coins",
+                            "description": "Top up your GIST Coins wallet",
+                        },
+                        "unit_amount": int(payload.amount_coins),
+                    },
+                    "quantity": 1,
+                }
+            ],
+            metadata={
+                "top_up_request_id": str(request_row.id),
+                "user_id": str(user_id),
+            },
+            success_url=success_url,
+            cancel_url=cancel_url,
+        )
+    except stripe.error.StripeError as exc:  # type: ignore[attr-defined]
+        request_row.status = "rejected"
+        request_row.note = (request_row.note or "").strip() or None
+        if request_row.note:
+            request_row.note = f"{request_row.note} | session_error:{str(exc)[:80]}"
+        else:
+            request_row.note = f"session_error:{str(exc)[:80]}"
+        db.add(request_row)
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"Unable to create payment session: {str(exc)}")
+
+    request_row.provider_reference_id = session.id
+    db.add(request_row)
+    db.commit()
+    db.refresh(request_row)
+    if not session.url:
+        raise HTTPException(status_code=500, detail="Stripe session created without a checkout URL")
+
+    return StripeCheckoutSessionOut(
+        top_up_request_id=int(request_row.id),
+        amount_coins=int(request_row.amount_coins),
+        amount_usd_cents=int(payload.amount_coins),
+        session_id=session.id,
+        session_url=session.url,
+        provider_reference_id=session.id,
+    )
+
+
+@router.post("/stripe/webhooks")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)) -> dict[str, str]:
+    settings = get_settings()
+    signature = request.headers.get("stripe-signature")
+    if not signature:
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header")
+
+    _assert_stripe_setup()
+    _assert_stripe_webhook_secret()
+    stripe.api_key = settings.stripe_secret_key.strip()
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty webhook body")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=body,
+            sig_header=signature,
+            secret=settings.stripe_webhook_secret.strip(),
+        )
+    except (ValueError, stripe.error.SignatureVerificationError) as exc:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=400, detail=f"Invalid webhook signature: {str(exc)}")
+
+    if event.get("type") == "checkout.session.completed":
+        session = event["data"]["object"]
+        session_id = session.get("id")
+        if session.get("payment_status") == "paid" and session_id:
+            top_up_request = _resolve_top_up_request_by_session(db, session_id)
+            if top_up_request is not None and top_up_request.status != "approved":
+                _apply_stripe_top_up_success(db, top_up_request)
+                db.commit()
+                db.refresh(top_up_request)
+    elif event.get("type") == "checkout.session.async_payment_succeeded":
+        session = event["data"]["object"]
+        session_id = session.get("id")
+        if session_id:
+            top_up_request = _resolve_top_up_request_by_session(db, session_id)
+            if top_up_request is not None:
+                _apply_stripe_top_up_success(db, top_up_request)
+                db.commit()
+                db.refresh(top_up_request)
+
+    return {"received": "true"}
 
 
 @router.get("/me", response_model=GistCoinWalletOut)

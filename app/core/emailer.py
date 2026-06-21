@@ -1,5 +1,6 @@
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from app.core.config import get_settings
@@ -12,12 +13,12 @@ def send_otp_email(email: str, otp: str, subject: str, intro: str) -> None:
     sender = settings.smtp_from_email or settings.smtp_username
 
     if not sender:
-        logger.warning("SMTP sender missing; OTP for %s is %s", email, otp)
-        return
+        logger.error("SMTP sender missing while trying to send OTP for %s", email)
+        raise RuntimeError("SMTP sender is not configured")
 
     if not settings.smtp_host:
-        logger.warning("SMTP host missing; OTP for %s is %s", email, otp)
-        return
+        logger.error("SMTP host missing while trying to send OTP for %s", email)
+        raise RuntimeError("SMTP host is not configured")
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -40,7 +41,14 @@ def send_otp_email(email: str, otp: str, subject: str, intro: str) -> None:
         # Port 587 typically uses explicit STARTTLS.
         with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as server:
             if settings.smtp_use_tls:
-                server.starttls()
+                try:
+                    server.starttls(context=ssl.create_default_context())
+                except smtplib.SMTPNotSupportedError:
+                    # Some providers still accept plain-text SMTP on 587; continue without STARTTLS.
+                    logger.warning("STARTTLS not supported for SMTP host %s; sending on plain connection", settings.smtp_host)
+                except smtplib.SMTPException as exc:
+                    logger.exception("SMTP starttls failed for %s", email)
+                    raise RuntimeError("SMTP TLS setup failed") from exc
             if settings.smtp_username and settings.smtp_password:
                 server.login(settings.smtp_username, settings.smtp_password)
             server.send_message(msg)

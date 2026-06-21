@@ -218,12 +218,20 @@ def sign_up_request_otp(payload: SignUpRequestOtpIn, db: Session = Depends(get_d
     )
     db.commit()
 
-    send_otp_email(
-        email=email,
-        otp=otp,
-        subject="Gist sign-up verification OTP",
-        intro="Use this OTP to verify your email and complete your Gist registration.",
-    )
+    try:
+        send_otp_email(
+            email=email,
+            otp=otp,
+            subject="Gist sign-up verification OTP",
+            intro="Use this OTP to verify your email and complete your Gist registration.",
+        )
+    except Exception as exc:
+        logger.exception("sign-up/request-otp email failure for %s", email)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not send OTP email right now. Please try again in a moment.",
+        ) from exc
+
     return OtpAckOut(success=True, message="OTP sent to your email")
 
 
@@ -419,11 +427,16 @@ def forgot_password_request_otp(payload: ForgotPasswordRequestOtpIn, db: Session
     settings = get_settings()
     email = _validate_email(payload.email)
     user = db.execute(select(User).where(User.email == email, User.is_active.is_(True))).scalar_one_or_none()
+    logger.info("forgot-password/request-otp called for %s", email)
 
     if user is not None:
         otp = create_otp_code()
         expires_at = datetime.now(UTC) + timedelta(minutes=settings.otp_expire_minutes)
 
+        db.execute(
+            text("DELETE FROM auth_password_reset_otps WHERE user_id = :uid AND email = :email AND consumed_at IS NULL"),
+            {"uid": user.id, "email": email},
+        )
         db.execute(
             text(
                 """
@@ -440,12 +453,22 @@ def forgot_password_request_otp(payload: ForgotPasswordRequestOtpIn, db: Session
         )
         db.commit()
 
-        send_otp_email(
-            email=email,
-            otp=otp,
-            subject="Gist password reset OTP",
-            intro="Use this OTP to reset your Gist account password.",
-        )
+        try:
+            send_otp_email(
+                email=email,
+                otp=otp,
+                subject="Gist password reset OTP",
+                intro="Use this OTP to reset your Gist account password.",
+            )
+            logger.info("forgot-password/request-otp sent OTP to %s", email)
+        except Exception as exc:
+            logger.exception("forgot-password/request-otp email failure for %s", email)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not send OTP email right now. Please try again in a moment.",
+            ) from exc
+    else:
+        logger.info("forgot-password/request-otp no active user found for %s", email)
 
     return OtpAckOut(success=True, message="If the account exists, an OTP has been sent")
 
