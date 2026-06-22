@@ -14,6 +14,7 @@ from app.core.r2 import extract_r2_bucket_and_key
 from app.models.user import User
 from app.models.prediction import Prediction, PredictionEstimate
 from app.models.voice_issue import VoiceIssue
+from app.models.voice_live import VoiceLiveParticipant, VoiceLiveSession
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
 from app.models.voice_stance import VoiceStance
 from app.models.voice_take import VoiceTake
@@ -40,6 +41,12 @@ from app.schemas.voice import (
     VoiceTakeCreateIn,
     VoiceTakeOut,
     VoiceTakeReplyOut,
+    VoiceLiveEndIn,
+    VoiceLiveInviteIn,
+    VoiceLiveJoinIn,
+    VoiceLiveParticipantOut,
+    VoiceLiveSessionCreateIn,
+    VoiceLiveSessionOut,
 )
 
 router = APIRouter(prefix="/voice", tags=["voice"])
@@ -83,6 +90,7 @@ def _validate_take_audio_url(audio_url: str | None) -> str | None:
 def _issue_to_out(
     issue: VoiceIssue,
     viewer_stance: str | None = None,
+    live_session: VoiceLiveSession | None = None,
 ) -> VoiceIssueOut:
     return VoiceIssueOut(
         id=issue.id,
@@ -101,7 +109,125 @@ def _issue_to_out(
         expires_at=issue.expires_at,
         created_at=issue.created_at,
         viewer_stance=viewer_stance,
+        is_live_debate=live_session is not None and live_session.status == "active",
+        live_session_id=live_session.id if live_session else None,
+        live_session_status=live_session.status if live_session else None,
+        live_provider=live_session.provider if live_session else None,
+        live_join_url=live_session.join_url if live_session else None,
     )
+
+
+def _active_live_session_for_issue(db: Session, issue_id: int) -> VoiceLiveSession | None:
+    return db.execute(
+        select(VoiceLiveSession)
+        .where(VoiceLiveSession.issue_id == issue_id, VoiceLiveSession.status == "active")
+        .order_by(VoiceLiveSession.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _build_live_join_url(room_slug: str) -> str:
+    return f"https://meet.jit.si/{room_slug}"
+
+
+def _normalize_invitee_ids(invitee_user_ids: list[int], host_user_id: int) -> list[int]:
+    seen: set[int] = set()
+    normalized: list[int] = []
+    for raw_id in invitee_user_ids:
+        user_id = int(raw_id)
+        if user_id <= 0 or user_id == host_user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        normalized.append(user_id)
+    if len(normalized) > 7:
+        raise HTTPException(status_code=422, detail="You can invite up to 7 friends")
+    return normalized
+
+
+def _live_session_to_out(db: Session, session: VoiceLiveSession) -> VoiceLiveSessionOut:
+    rows = db.execute(
+        select(VoiceLiveParticipant, User)
+        .join(User, User.id == VoiceLiveParticipant.user_id)
+        .where(VoiceLiveParticipant.session_id == session.id)
+        .order_by(VoiceLiveParticipant.role.asc(), VoiceLiveParticipant.created_at.asc())
+    ).all()
+
+    participants = [
+        VoiceLiveParticipantOut(
+            user_id=participant.user_id,
+            display_name=user.display_name,
+            username=user.username,
+            avatar_url=user.avatar_url,
+            role=participant.role,
+            status=participant.status,
+            joined_at=participant.joined_at,
+        )
+        for participant, user in rows
+    ]
+    active_count = sum(1 for item in participants if item.status == "joined")
+    invited_count = sum(1 for item in participants if item.role == "member")
+    return VoiceLiveSessionOut(
+        id=session.id,
+        issue_id=session.issue_id,
+        room_slug=session.room_slug,
+        provider=session.provider,
+        status=session.status,
+        join_url=session.join_url,
+        host_user_id=session.host_user_id,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        max_participants=session.max_participants,
+        active_participants_count=active_count,
+        invited_count=invited_count,
+        available_invites=max(0, session.max_participants - 1 - invited_count),
+        participants=participants,
+    )
+
+
+def _ensure_live_user(db: Session, user_id: int) -> User:
+    user = db.get(User, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def _add_live_invites(
+    db: Session,
+    session: VoiceLiveSession,
+    *,
+    inviter_user_id: int,
+    invitee_user_ids: list[int],
+) -> None:
+    invitee_ids = _normalize_invitee_ids(invitee_user_ids, inviter_user_id)
+    if not invitee_ids:
+        return
+
+    users = db.execute(select(User).where(User.id.in_(invitee_ids), User.is_active.is_(True))).scalars().all()
+    found_ids = {int(user.id) for user in users}
+    missing_ids = [user_id for user_id in invitee_ids if user_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Invitee not found: {missing_ids[0]}")
+
+    existing_participants = db.execute(
+        select(VoiceLiveParticipant)
+        .where(VoiceLiveParticipant.session_id == session.id)
+    ).scalars().all()
+    existing_user_ids = {int(participant.user_id) for participant in existing_participants}
+    existing_member_count = sum(1 for participant in existing_participants if participant.role == "member")
+    new_invitee_ids = [invitee_id for invitee_id in invitee_ids if invitee_id not in existing_user_ids]
+    if existing_member_count + len(new_invitee_ids) > session.max_participants - 1:
+        raise HTTPException(status_code=422, detail="Live rooms support the host plus 7 invited friends")
+
+    for invitee_id in new_invitee_ids:
+        db.add(
+            VoiceLiveParticipant(
+                session_id=session.id,
+                user_id=invitee_id,
+                role="member",
+                status="invited",
+                invited_by_user_id=inviter_user_id,
+            )
+        )
 
 
 def _format_time_info(closes_at: datetime | None) -> str:
@@ -204,7 +330,7 @@ def get_featured_issue(
         ).scalar_one_or_none()
         viewer_stance = row
 
-    return _issue_to_out(issue, viewer_stance)
+    return _issue_to_out(issue, viewer_stance, _active_live_session_for_issue(db, issue.id))
 
 
 @router.get("/issues", response_model=list[VoiceIssueOut])
@@ -254,7 +380,19 @@ def list_issues(
         ).all()
         stance_map = {row.issue_id: row.stance for row in rows}
 
-    return [_issue_to_out(issue, stance_map.get(issue.id)) for issue in issues]
+    active_live_rows = db.execute(
+        select(VoiceLiveSession)
+        .where(
+            VoiceLiveSession.issue_id.in_([issue.id for issue in issues]),
+            VoiceLiveSession.status == "active",
+        )
+        .order_by(VoiceLiveSession.created_at.desc())
+    ).scalars().all()
+    live_by_issue: dict[int, VoiceLiveSession] = {}
+    for live_session in active_live_rows:
+        live_by_issue.setdefault(live_session.issue_id, live_session)
+
+    return [_issue_to_out(issue, stance_map.get(issue.id), live_by_issue.get(issue.id)) for issue in issues]
 
 
 @router.get("/issues/{issue_id}", response_model=VoiceIssueOut)
@@ -275,7 +413,7 @@ def get_issue(
         ).scalar_one_or_none()
         viewer_stance = row
 
-    return _issue_to_out(issue, viewer_stance)
+    return _issue_to_out(issue, viewer_stance, _active_live_session_for_issue(db, issue.id))
 
 
 MAX_ISSUE_LIFETIME_DAYS = 10
@@ -387,6 +525,185 @@ def expire_issues(db: Session = Depends(get_db)) -> dict:
     expired_ids = [row[0] for row in result.fetchall()]
     db.commit()
     return {"archived": len(expired_ids), "ids": expired_ids}
+
+
+# ---------------------------------------------------------------------------
+# Live sessions
+# ---------------------------------------------------------------------------
+
+@router.get("/issues/{issue_id}/live-session", response_model=VoiceLiveSessionOut)
+def get_issue_live_session(
+    issue_id: int,
+    db: Session = Depends(get_db),
+) -> VoiceLiveSessionOut:
+    issue = db.get(VoiceIssue, issue_id)
+    if not issue or issue.status == "archived":
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    session = _active_live_session_for_issue(db, issue_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="No active live session")
+
+    return _live_session_to_out(db, session)
+
+
+@router.post("/issues/{issue_id}/live-session", response_model=VoiceLiveSessionOut, status_code=201)
+def create_issue_live_session(
+    issue_id: int,
+    body: VoiceLiveSessionCreateIn,
+    db: Session = Depends(get_db),
+) -> VoiceLiveSessionOut:
+    issue = db.get(VoiceIssue, issue_id)
+    if not issue or issue.status == "archived":
+        raise HTTPException(status_code=404, detail="Issue not found")
+
+    host = _ensure_live_user(db, body.user_id)
+    existing = _active_live_session_for_issue(db, issue_id)
+    if existing:
+        return _live_session_to_out(db, existing)
+
+    room_slug = f"gist-live-{issue_id}-{uuid.uuid4().hex[:12]}"
+    session = VoiceLiveSession(
+        issue_id=issue_id,
+        host_user_id=host.id,
+        room_slug=room_slug,
+        provider="jitsi",
+        join_url=_build_live_join_url(room_slug),
+        status="active",
+        max_participants=8,
+    )
+    db.add(session)
+    db.flush()
+    db.add(
+        VoiceLiveParticipant(
+            session_id=session.id,
+            user_id=host.id,
+            role="host",
+            status="joined",
+            joined_at=datetime.now(timezone.utc),
+        )
+    )
+    _add_live_invites(db, session, inviter_user_id=host.id, invitee_user_ids=body.invitee_user_ids)
+    db.commit()
+    db.refresh(session)
+    return _live_session_to_out(db, session)
+
+
+@router.post("/live-sessions/{session_id}/invite", response_model=VoiceLiveSessionOut)
+def invite_to_live_session(
+    session_id: int,
+    body: VoiceLiveInviteIn,
+    db: Session = Depends(get_db),
+) -> VoiceLiveSessionOut:
+    session = db.get(VoiceLiveSession, session_id)
+    if not session or session.status != "active":
+        raise HTTPException(status_code=404, detail="Active live session not found")
+    if session.host_user_id != body.user_id:
+        raise HTTPException(status_code=403, detail="Only the host can invite friends")
+
+    _add_live_invites(db, session, inviter_user_id=body.user_id, invitee_user_ids=body.invitee_user_ids)
+    db.commit()
+    db.refresh(session)
+    return _live_session_to_out(db, session)
+
+
+@router.post("/live-sessions/{session_id}/join", response_model=VoiceLiveSessionOut)
+def join_live_session(
+    session_id: int,
+    body: VoiceLiveJoinIn,
+    db: Session = Depends(get_db),
+) -> VoiceLiveSessionOut:
+    session = db.get(VoiceLiveSession, session_id)
+    if not session or session.status != "active":
+        raise HTTPException(status_code=404, detail="Active live session not found")
+
+    _ensure_live_user(db, body.user_id)
+    participant = db.execute(
+        select(VoiceLiveParticipant)
+        .where(VoiceLiveParticipant.session_id == session_id, VoiceLiveParticipant.user_id == body.user_id)
+    ).scalar_one_or_none()
+
+    if not participant:
+        active_or_invited_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(VoiceLiveParticipant)
+                .where(VoiceLiveParticipant.session_id == session_id)
+            )
+            or 0
+        )
+        if active_or_invited_count >= session.max_participants:
+            raise HTTPException(status_code=422, detail="This live room is full")
+        participant = VoiceLiveParticipant(
+            session_id=session_id,
+            user_id=body.user_id,
+            role="member",
+            status="joined",
+            joined_at=datetime.now(timezone.utc),
+        )
+        db.add(participant)
+    else:
+        participant.status = "joined"
+        participant.joined_at = datetime.now(timezone.utc)
+        participant.left_at = None
+
+    db.commit()
+    db.refresh(session)
+    return _live_session_to_out(db, session)
+
+
+@router.post("/live-sessions/{session_id}/leave", response_model=VoiceLiveSessionOut)
+def leave_live_session(
+    session_id: int,
+    body: VoiceLiveJoinIn,
+    db: Session = Depends(get_db),
+) -> VoiceLiveSessionOut:
+    session = db.get(VoiceLiveSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Live session not found")
+
+    participant = db.execute(
+        select(VoiceLiveParticipant)
+        .where(VoiceLiveParticipant.session_id == session_id, VoiceLiveParticipant.user_id == body.user_id)
+    ).scalar_one_or_none()
+    if participant:
+        participant.status = "left"
+        participant.left_at = datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(session)
+    return _live_session_to_out(db, session)
+
+
+@router.post("/live-sessions/{session_id}/end")
+def end_live_session(
+    session_id: int,
+    body: VoiceLiveEndIn,
+    db: Session = Depends(get_db),
+) -> dict:
+    session = db.get(VoiceLiveSession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Live session not found")
+    if session.host_user_id != body.user_id:
+        raise HTTPException(status_code=403, detail="Only the host can end this live session")
+
+    session.status = "ended"
+    session.ended_at = datetime.now(timezone.utc)
+    db.execute(
+        text(
+            """
+            UPDATE voice_live_participants
+               SET status = 'left',
+                   left_at = COALESCE(left_at, :now),
+                   updated_at = :now
+             WHERE session_id = :session_id
+               AND status <> 'left'
+            """
+        ),
+        {"session_id": session_id, "now": session.ended_at},
+    )
+    db.commit()
+    return {"ok": True, "session_id": session.id, "issue_id": session.issue_id, "status": session.status}
 
 
 # ---------------------------------------------------------------------------

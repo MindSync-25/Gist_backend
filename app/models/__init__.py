@@ -17,6 +17,7 @@ from app.models.sponsored_campaign import SponsoredCampaign
 from app.models.topic import Topic
 from app.models.user import User
 from app.models.voice_issue import VoiceIssue
+from app.models.voice_live import VoiceLiveParticipant, VoiceLiveSession
 from app.models.voice_stance import VoiceStance
 from app.models.voice_take import VoiceTake
 from app.models.voice_poll import VoicePoll, VoicePollOption, VoicePollVote
@@ -50,6 +51,8 @@ __all__ = [
         "Topic",
         "User",
         "VoiceIssue",
+        "VoiceLiveParticipant",
+        "VoiceLiveSession",
         "VoiceStance",
         "VoiceTake",
         "VoicePoll",

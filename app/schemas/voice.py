@@ -24,6 +24,11 @@ class VoiceIssueOut(BaseModel):
     expires_at: datetime | None = None
     created_at: datetime
     viewer_stance: str | None = None  # populated when viewer_user_id is provided
+    is_live_debate: bool = False
+    live_session_id: int | None = None
+    live_session_status: str | None = None
+    live_provider: str | None = None
+    live_join_url: str | None = None
 
     class Config:
         from_attributes = True
@@ -261,6 +266,51 @@ class VoiceUserActivityItemOut(BaseModel):
     content: str | None = None
     poll_id: int | None = None
     poll_question: str | None = None
+
+
+class VoiceLiveParticipantOut(BaseModel):
+    user_id: int
+    display_name: str
+    username: str
+    avatar_url: str | None = None
+    role: str
+    status: str
+    joined_at: datetime | None = None
+
+
+class VoiceLiveSessionOut(BaseModel):
+    id: int
+    issue_id: int
+    room_slug: str
+    provider: str
+    status: str
+    join_url: str
+    host_user_id: int | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    max_participants: int
+    active_participants_count: int
+    invited_count: int
+    available_invites: int
+    participants: list[VoiceLiveParticipantOut] = Field(default_factory=list)
+
+
+class VoiceLiveSessionCreateIn(BaseModel):
+    user_id: int = Field(gt=0)
+    invitee_user_ids: list[int] = Field(default_factory=list, max_length=7)
+
+
+class VoiceLiveInviteIn(BaseModel):
+    user_id: int = Field(gt=0)
+    invitee_user_ids: list[int] = Field(min_length=1, max_length=7)
+
+
+class VoiceLiveJoinIn(BaseModel):
+    user_id: int = Field(gt=0)
+
+
+class VoiceLiveEndIn(BaseModel):
+    user_id: int = Field(gt=0)
 
 
 try:
