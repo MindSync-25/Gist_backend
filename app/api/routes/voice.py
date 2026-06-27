@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from jose import jwt
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
@@ -42,6 +43,8 @@ from app.schemas.voice import (
     VoiceTakeOut,
     VoiceTakeReplyOut,
     VoiceLiveEndIn,
+    VoiceLiveConnectionIn,
+    VoiceLiveConnectionOut,
     VoiceLiveInviteIn,
     VoiceLiveJoinIn,
     VoiceLiveParticipantOut,
@@ -127,7 +130,7 @@ def _active_live_session_for_issue(db: Session, issue_id: int) -> VoiceLiveSessi
 
 
 def _build_live_join_url(room_slug: str) -> str:
-    return f"https://meet.jit.si/{room_slug}"
+    return f"gist://voice/live?room={room_slug}"
 
 
 def _normalize_invitee_ids(invitee_user_ids: list[int], host_user_id: int) -> list[int]:
@@ -189,6 +192,78 @@ def _ensure_live_user(db: Session, user_id: int) -> User:
     if not user or not user.is_active:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+def _livekit_connection_out(
+    *,
+    db: Session,
+    session: VoiceLiveSession,
+    user_id: int,
+    requested_role: str,
+) -> VoiceLiveConnectionOut:
+    settings = get_settings()
+    if not settings.livekit_url or not settings.livekit_api_key or not settings.livekit_api_secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Live streaming is not configured. Set LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET.",
+        )
+
+    user = _ensure_live_user(db, user_id)
+    participant = db.execute(
+        select(VoiceLiveParticipant)
+        .where(VoiceLiveParticipant.session_id == session.id, VoiceLiveParticipant.user_id == user_id)
+    ).scalar_one_or_none()
+
+    is_host = session.host_user_id == user_id
+    wants_publish = requested_role in {"host", "speaker"}
+    if requested_role == "host" and not is_host:
+        raise HTTPException(status_code=403, detail="Only the host can publish as host")
+    if wants_publish and not is_host and (not participant or participant.invited_by_user_id is None):
+        raise HTTPException(status_code=403, detail="Only invited speakers can publish in this live")
+
+    if wants_publish and participant:
+        participant.status = "joined"
+        participant.joined_at = datetime.now(timezone.utc)
+        participant.left_at = None
+        db.commit()
+
+    can_publish = bool(wants_publish)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(hours=6)
+    identity = f"user-{user.id}"
+    room_name = session.room_slug
+    payload = {
+        "iss": settings.livekit_api_key,
+        "sub": identity,
+        "name": user.display_name or user.username or identity,
+        "nbf": int(now.timestamp()),
+        "exp": int(expires_at.timestamp()),
+        "metadata": json.dumps(
+            {
+                "user_id": user.id,
+                "issue_id": session.issue_id,
+                "live_session_id": session.id,
+                "role": "host" if is_host else ("speaker" if can_publish else "viewer"),
+            }
+        ),
+        "video": {
+            "roomJoin": True,
+            "room": room_name,
+            "canPublish": can_publish,
+            "canSubscribe": True,
+            "canPublishData": True,
+            "roomAdmin": bool(is_host),
+        },
+    }
+    token = jwt.encode(payload, settings.livekit_api_secret, algorithm="HS256")
+    return VoiceLiveConnectionOut(
+        provider="livekit",
+        server_url=settings.livekit_url,
+        token=token,
+        room_name=room_name,
+        identity=identity,
+        can_publish=can_publish,
+    )
 
 
 def _add_live_invites(
@@ -567,7 +642,7 @@ def create_issue_live_session(
         issue_id=issue_id,
         host_user_id=host.id,
         room_slug=room_slug,
-        provider="jitsi",
+        provider="livekit",
         join_url=_build_live_join_url(room_slug),
         status="active",
         max_participants=8,
@@ -587,6 +662,24 @@ def create_issue_live_session(
     db.commit()
     db.refresh(session)
     return _live_session_to_out(db, session)
+
+
+@router.post("/live-sessions/{session_id}/connection", response_model=VoiceLiveConnectionOut)
+def create_live_session_connection(
+    session_id: int,
+    body: VoiceLiveConnectionIn,
+    db: Session = Depends(get_db),
+) -> VoiceLiveConnectionOut:
+    session = db.get(VoiceLiveSession, session_id)
+    if not session or session.status != "active":
+        raise HTTPException(status_code=404, detail="Active live session not found")
+
+    return _livekit_connection_out(
+        db=db,
+        session=session,
+        user_id=body.user_id,
+        requested_role=body.role,
+    )
 
 
 @router.post("/live-sessions/{session_id}/invite", response_model=VoiceLiveSessionOut)

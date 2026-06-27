@@ -96,6 +96,11 @@ class Settings(BaseSettings):
 
     share_public_base_url: str = "https://share.gistverse.com"
 
+    # Live video rooms (LiveKit Cloud or self-hosted LiveKit)
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
     @property
     def database_url(self) -> str:
         if self.database_url_override:

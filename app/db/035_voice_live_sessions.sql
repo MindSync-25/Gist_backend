@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS voice_live_sessions (
     issue_id BIGINT NOT NULL REFERENCES voice_issues(id) ON DELETE CASCADE,
     host_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
     room_slug VARCHAR(160) NOT NULL UNIQUE,
-    provider VARCHAR(40) NOT NULL DEFAULT 'jitsi',
+    provider VARCHAR(40) NOT NULL DEFAULT 'livekit',
     join_url TEXT NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     max_participants INTEGER NOT NULL DEFAULT 8,

@@ -21,7 +21,7 @@ class VoiceLiveSession(Base):
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     room_slug: Mapped[str] = mapped_column(String(160), nullable=False, unique=True)
-    provider: Mapped[str] = mapped_column(String(40), nullable=False, default="jitsi")
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, default="livekit")
     join_url: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
     max_participants: Mapped[int] = mapped_column(Integer, nullable=False, default=8)

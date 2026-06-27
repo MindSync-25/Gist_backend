@@ -17,7 +17,12 @@ from app.core.security import decode_access_token
 from app.models.user import User
 from app.models.user_block import UserBlock
 from app.schemas.message import (
+    ConversationAddMembersIn,
     ConversationCreateDirectIn,
+    ConversationCreateGroupIn,
+    ConversationGroupUpdateIn,
+    ConversationMemberRoleUpdateIn,
+    ConversationMemberUpdateOut,
     ConversationOut,
     MessageDeleteOut,
     ConversationStatusUpdateOut,
@@ -143,6 +148,10 @@ def _direct_conversation_id(user_a: int, user_b: int) -> str:
     return f"dm-{lo}-{hi}"
 
 
+def _group_conversation_id() -> str:
+    return f"grp-{uuid4()}"
+
+
 def _put_conversation_shell(conversation_id: str, participants: list[int], created_by_user_id: int) -> None:
     now = _iso_now()
     t = _table()
@@ -185,6 +194,65 @@ def _put_conversation_shell(conversation_id: str, participants: list[int], creat
         )
 
 
+def _put_group_conversation_shell(
+    conversation_id: str,
+    participants: list[int],
+    created_by_user_id: int,
+    name: str,
+    description: str | None,
+    avatar_url: str | None,
+) -> None:
+    now = _iso_now()
+    t = _table()
+    owner_id = int(created_by_user_id)
+    unique_participants = list(dict.fromkeys([owner_id, *[int(uid) for uid in participants]]))
+    member_roles = {str(uid): ("owner" if int(uid) == owner_id else "member") for uid in unique_participants}
+
+    t.put_item(
+        Item={
+            "PK": f"CONV#{conversation_id}",
+            "SK": "META",
+            "entity_type": "conversation",
+            "conversation_id": conversation_id,
+            "conversation_type": "group",
+            "group_name": name,
+            "group_description": description or "",
+            "group_avatar_url": avatar_url or "",
+            "participant_user_ids": unique_participants,
+            "member_roles": member_roles,
+            "created_by_user_id": owner_id,
+            "owner_user_id": owner_id,
+            "last_message_at": now,
+            "last_message_preview": "Group created",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    for uid in unique_participants:
+        role = "owner" if int(uid) == owner_id else "member"
+        t.put_item(
+            Item={
+                "PK": f"USER#{uid}",
+                "SK": f"CONV#{conversation_id}",
+                "entity_type": "member",
+                "conversation_id": conversation_id,
+                "conversation_type": "group",
+                "participant_user_ids": unique_participants,
+                "user_id": uid,
+                "member_role": role,
+                "conversation_status": "accepted",
+                "last_message_at": now,
+                "last_message_preview": "Group created",
+                "unread_count": 0,
+                "GSI1PK": f"USER#{uid}",
+                "GSI1SK": now,
+                "joined_at": now,
+                "updated_at": now,
+            }
+        )
+
+
 def _get_users_map(db: Session, user_ids: list[int]) -> dict[int, User]:
     if not user_ids:
         return {}
@@ -203,26 +271,40 @@ def _ensure_not_blocked_between(db: Session, user_a: int, user_b: int) -> None:
         raise HTTPException(status_code=403, detail="Messaging unavailable due to block settings")
 
 
-def _build_participants(participant_ids: list[int], users_by_id: dict[int, User]) -> list[ConversationParticipantOut]:
+def _build_participants(
+    participant_ids: list[int],
+    users_by_id: dict[int, User],
+    member_roles: dict[str, str] | None = None,
+) -> list[ConversationParticipantOut]:
     out: list[ConversationParticipantOut] = []
     for uid in participant_ids:
         user = users_by_id.get(uid)
+        raw_role = (member_roles or {}).get(str(uid))
+        role = raw_role if raw_role in {"owner", "admin", "member"} else None
         out.append(
             ConversationParticipantOut(
                 user_id=uid,
                 username=user.username if user else None,
                 display_name=user.display_name if user else None,
                 avatar_url=user.avatar_url if user else None,
+                role=role,
             )
         )
     return out
 
 
 def _normalize_member_status(raw: str | None) -> str:
-    allowed = {"accepted", "request", "rejected", "archived"}
+    allowed = {"accepted", "request", "rejected", "archived", "left", "removed", "invited"}
     if raw in allowed:
         return str(raw)
     return "accepted"
+
+
+def _normalize_member_role(raw: str | None) -> str:
+    allowed = {"owner", "admin", "member"}
+    if raw in allowed:
+        return str(raw)
+    return "member"
 
 
 def _set_member_status(conversation_id: str, user_id: int, status: str) -> None:
@@ -231,6 +313,65 @@ def _set_member_status(conversation_id: str, user_id: int, status: str) -> None:
         Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"},
         UpdateExpression="SET conversation_status=:status, updated_at=:upd",
         ExpressionAttributeValues={":status": status, ":upd": now},
+    )
+
+
+def _conversation_meta_or_404(conversation_id: str) -> dict:
+    meta = _table().get_item(Key={"PK": f"CONV#{conversation_id}", "SK": "META"}).get("Item")
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return meta
+
+
+def _member_item_or_404(conversation_id: str, user_id: int) -> dict:
+    member_item = _table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"}
+    ).get("Item")
+    if member_item is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return member_item
+
+
+def _require_group_admin(conversation_id: str, user_id: int) -> tuple[dict, dict]:
+    meta = _conversation_meta_or_404(conversation_id)
+    if str(meta.get("conversation_type", "direct")) != "group":
+        raise HTTPException(status_code=400, detail="Conversation is not a group")
+    member = _member_item_or_404(conversation_id, user_id)
+    status = _normalize_member_status(member.get("conversation_status"))
+    role = _normalize_member_role(member.get("member_role"))
+    if status != "accepted" or role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Only group admins can do this")
+    return meta, member
+
+
+def _conversation_out(
+    conversation_id: str,
+    meta: dict,
+    member_item: dict | None,
+    users_by_id: dict[int, User],
+) -> ConversationOut:
+    now = _iso_now()
+    pids = [int(v) for v in meta.get("participant_user_ids", [])]
+    member_roles_raw = meta.get("member_roles", {})
+    member_roles = member_roles_raw if isinstance(member_roles_raw, dict) else {}
+    conversation_type = str(meta.get("conversation_type", "direct"))
+    member_status = _normalize_member_status((member_item or {}).get("conversation_status"))
+    member_role = _normalize_member_role((member_item or {}).get("member_role")) if conversation_type == "group" else None
+
+    return ConversationOut(
+        id=conversation_id,
+        conversation_type=conversation_type,
+        conversation_status=member_status,
+        participants=_build_participants(pids, users_by_id, member_roles),
+        last_message_preview=str((member_item or {}).get("last_message_preview", meta.get("last_message_preview", ""))),
+        last_message_at=str((member_item or {}).get("last_message_at", meta.get("last_message_at", now))),
+        unread_count=int((member_item or {}).get("unread_count", 0)),
+        updated_at=str(meta.get("updated_at", now)),
+        group_name=str(meta.get("group_name", "")) if conversation_type == "group" else None,
+        group_description=str(meta.get("group_description", "")) if conversation_type == "group" else None,
+        group_avatar_url=str(meta.get("group_avatar_url", "")) if conversation_type == "group" else None,
+        member_count=len(pids) if conversation_type == "group" else None,
+        current_user_role=member_role,
     )
 
 
@@ -279,16 +420,51 @@ def create_or_get_direct_conversation(
     ).get("Item")
     conversation_status = _normalize_member_status((member_item or {}).get("conversation_status"))
 
-    return ConversationOut(
-        id=conversation_id,
-        conversation_type=str(meta.get("conversation_type", "direct")),
-        conversation_status=conversation_status,
-        participants=_build_participants(participant_ids, users_by_id),
-        last_message_preview=str(meta.get("last_message_preview", "")),
-        last_message_at=str(meta.get("last_message_at", now)),
-        unread_count=int((member_item or {}).get("unread_count", 0)),
-        updated_at=str(meta.get("updated_at", now)),
+    return _conversation_out(conversation_id, meta, member_item, users_by_id)
+
+
+@router.post("/conversations/group", response_model=ConversationOut)
+def create_group_conversation(
+    payload: ConversationCreateGroupIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationOut:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Group name is required")
+
+    requested_member_ids = [int(uid) for uid in payload.member_user_ids if int(uid) != int(current_user.id)]
+    unique_member_ids = list(dict.fromkeys(requested_member_ids))
+    if not unique_member_ids:
+        raise HTTPException(status_code=400, detail="Add at least one member")
+
+    users = db.execute(
+        select(User).where(User.id.in_(unique_member_ids), User.is_active.is_(True))
+    ).scalars().all()
+    found_ids = {int(u.id) for u in users}
+    missing_ids = [uid for uid in unique_member_ids if uid not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="One or more members were not found")
+
+    for uid in unique_member_ids:
+        _ensure_not_blocked_between(db, int(current_user.id), uid)
+
+    _ensure_table_exists()
+    conversation_id = _group_conversation_id()
+    _put_group_conversation_shell(
+        conversation_id,
+        unique_member_ids,
+        int(current_user.id),
+        name,
+        payload.description.strip() if payload.description else None,
+        payload.avatar_url.strip() if payload.avatar_url else None,
     )
+
+    meta = _conversation_meta_or_404(conversation_id)
+    member_item = _member_item_or_404(conversation_id, int(current_user.id))
+    participant_ids = [int(v) for v in meta.get("participant_user_ids", [])]
+    users_by_id = _get_users_map(db, participant_ids)
+    return _conversation_out(conversation_id, meta, member_item, users_by_id)
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
@@ -336,19 +512,7 @@ def list_conversations(
         member_status = _normalize_member_status(member.get("conversation_status"))
         if status != "all" and member_status != status:
             continue
-        pids = [int(v) for v in meta.get("participant_user_ids", [])]
-        out.append(
-            ConversationOut(
-                id=cid,
-                conversation_type=str(meta.get("conversation_type", "direct")),
-                conversation_status=member_status,
-                participants=_build_participants(pids, users_by_id),
-                last_message_preview=str(member.get("last_message_preview", meta.get("last_message_preview", ""))),
-                last_message_at=str(member.get("last_message_at", meta.get("last_message_at", now))),
-                unread_count=int(member.get("unread_count", 0)),
-                updated_at=str(meta.get("updated_at", now)),
-            )
-        )
+        out.append(_conversation_out(cid, meta, member, users_by_id))
 
     return out
 
@@ -375,7 +539,7 @@ def accept_conversation_request(
     if member_item is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     member_status = _normalize_member_status((member_item or {}).get("conversation_status"))
-    if member_status in {"rejected", "archived"}:
+    if member_status in {"rejected", "archived", "left", "removed"}:
         raise HTTPException(status_code=403, detail="Conversation is not active for this user")
 
     _set_member_status(conversation_id, int(current_user.id), "accepted")
@@ -404,6 +568,271 @@ def reject_conversation_request(
     return ConversationStatusUpdateOut(ok=True, conversation_id=conversation_id, conversation_status="rejected")
 
 
+@router.patch("/conversations/{conversation_id}/group", response_model=ConversationOut)
+def update_group_conversation(
+    conversation_id: str,
+    payload: ConversationGroupUpdateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ConversationOut:
+    _ensure_table_exists()
+    meta, _member = _require_group_admin(conversation_id, int(current_user.id))
+
+    updates: list[str] = []
+    values: dict[str, str] = {":upd": _iso_now()}
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Group name is required")
+        updates.append("group_name=:name")
+        values[":name"] = name
+    if payload.description is not None:
+        updates.append("group_description=:desc")
+        values[":desc"] = payload.description.strip()
+    if payload.avatar_url is not None:
+        updates.append("group_avatar_url=:avatar")
+        values[":avatar"] = payload.avatar_url.strip()
+
+    if updates:
+        updates.append("updated_at=:upd")
+        _table().update_item(
+            Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
+            UpdateExpression="SET " + ", ".join(updates),
+            ExpressionAttributeValues=values,
+        )
+
+    meta = _conversation_meta_or_404(conversation_id)
+    member_item = _member_item_or_404(conversation_id, int(current_user.id))
+    users_by_id = _get_users_map(db, [int(v) for v in meta.get("participant_user_ids", [])])
+    return _conversation_out(conversation_id, meta, member_item, users_by_id)
+
+
+@router.post("/conversations/{conversation_id}/members", response_model=list[ConversationMemberUpdateOut])
+def add_group_members(
+    conversation_id: str,
+    payload: ConversationAddMembersIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[ConversationMemberUpdateOut]:
+    _ensure_table_exists()
+    meta, _member = _require_group_admin(conversation_id, int(current_user.id))
+
+    current_participants = [int(v) for v in meta.get("participant_user_ids", [])]
+    requested_ids = [int(uid) for uid in payload.member_user_ids if int(uid) != int(current_user.id)]
+    new_ids = [uid for uid in dict.fromkeys(requested_ids) if uid not in current_participants]
+    if not new_ids:
+        return []
+
+    users = db.execute(select(User).where(User.id.in_(new_ids), User.is_active.is_(True))).scalars().all()
+    found_ids = {int(u.id) for u in users}
+    missing_ids = [uid for uid in new_ids if uid not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="One or more members were not found")
+
+    for uid in new_ids:
+        _ensure_not_blocked_between(db, int(current_user.id), uid)
+
+    now = _iso_now()
+    updated_participants = [*current_participants, *new_ids]
+    member_roles_raw = meta.get("member_roles", {})
+    member_roles = member_roles_raw if isinstance(member_roles_raw, dict) else {}
+    for uid in new_ids:
+        member_roles[str(uid)] = "member"
+
+    t = _table()
+    t.update_item(
+        Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
+        UpdateExpression="SET participant_user_ids=:pids, member_roles=:roles, updated_at=:upd",
+        ExpressionAttributeValues={":pids": updated_participants, ":roles": member_roles, ":upd": now},
+    )
+
+    for uid in updated_participants:
+        if uid in new_ids:
+            t.put_item(
+                Item={
+                    "PK": f"USER#{uid}",
+                    "SK": f"CONV#{conversation_id}",
+                    "entity_type": "member",
+                    "conversation_id": conversation_id,
+                    "conversation_type": "group",
+                    "participant_user_ids": updated_participants,
+                    "user_id": uid,
+                    "member_role": "member",
+                    "conversation_status": "accepted",
+                    "last_message_at": str(meta.get("last_message_at", now)),
+                    "last_message_preview": str(meta.get("last_message_preview", "")),
+                    "unread_count": 0,
+                    "GSI1PK": f"USER#{uid}",
+                    "GSI1SK": str(meta.get("last_message_at", now)),
+                    "joined_at": now,
+                    "updated_at": now,
+                }
+            )
+        else:
+            t.update_item(
+                Key={"PK": f"USER#{uid}", "SK": f"CONV#{conversation_id}"},
+                UpdateExpression="SET participant_user_ids=:pids, updated_at=:upd",
+                ExpressionAttributeValues={":pids": updated_participants, ":upd": now},
+            )
+
+    return [
+        ConversationMemberUpdateOut(
+            ok=True,
+            conversation_id=conversation_id,
+            user_id=uid,
+            role="member",
+            conversation_status="accepted",
+        )
+        for uid in new_ids
+    ]
+
+
+@router.delete("/conversations/{conversation_id}/members/{user_id}", response_model=ConversationMemberUpdateOut)
+def remove_group_member(
+    conversation_id: str,
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+) -> ConversationMemberUpdateOut:
+    _ensure_table_exists()
+    meta, _member = _require_group_admin(conversation_id, int(current_user.id))
+    if int(user_id) == int(current_user.id):
+        raise HTTPException(status_code=400, detail="Use leave group instead")
+
+    member_roles_raw = meta.get("member_roles", {})
+    member_roles = member_roles_raw if isinstance(member_roles_raw, dict) else {}
+    target_role = _normalize_member_role(member_roles.get(str(user_id)))
+    requester_role = _normalize_member_role(_member.get("member_role"))
+    if target_role == "owner" or (target_role == "admin" and requester_role != "owner"):
+        raise HTTPException(status_code=403, detail="You cannot remove this member")
+
+    current_participants = [int(v) for v in meta.get("participant_user_ids", [])]
+    if int(user_id) not in current_participants:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    updated_participants = [uid for uid in current_participants if uid != int(user_id)]
+    member_roles.pop(str(user_id), None)
+    now = _iso_now()
+    t = _table()
+    t.update_item(
+        Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
+        UpdateExpression="SET participant_user_ids=:pids, member_roles=:roles, updated_at=:upd",
+        ExpressionAttributeValues={":pids": updated_participants, ":roles": member_roles, ":upd": now},
+    )
+    t.update_item(
+        Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"},
+        UpdateExpression="SET conversation_status=:status, participant_user_ids=:pids, unread_count=:uc, updated_at=:upd",
+        ExpressionAttributeValues={":status": "removed", ":pids": updated_participants, ":uc": 0, ":upd": now},
+    )
+    for uid in updated_participants:
+        t.update_item(
+            Key={"PK": f"USER#{uid}", "SK": f"CONV#{conversation_id}"},
+            UpdateExpression="SET participant_user_ids=:pids, updated_at=:upd",
+            ExpressionAttributeValues={":pids": updated_participants, ":upd": now},
+        )
+
+    return ConversationMemberUpdateOut(
+        ok=True,
+        conversation_id=conversation_id,
+        user_id=int(user_id),
+        conversation_status="removed",
+    )
+
+
+@router.patch("/conversations/{conversation_id}/members/{user_id}/role", response_model=ConversationMemberUpdateOut)
+def update_group_member_role(
+    conversation_id: str,
+    user_id: int,
+    payload: ConversationMemberRoleUpdateIn,
+    current_user: User = Depends(get_current_user),
+) -> ConversationMemberUpdateOut:
+    _ensure_table_exists()
+    meta, member = _require_group_admin(conversation_id, int(current_user.id))
+    if _normalize_member_role(member.get("member_role")) != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can change admin roles")
+
+    current_participants = [int(v) for v in meta.get("participant_user_ids", [])]
+    if int(user_id) not in current_participants:
+        raise HTTPException(status_code=404, detail="Member not found")
+    if int(user_id) == int(meta.get("owner_user_id", 0)):
+        raise HTTPException(status_code=400, detail="Owner role cannot be changed")
+
+    member_roles_raw = meta.get("member_roles", {})
+    member_roles = member_roles_raw if isinstance(member_roles_raw, dict) else {}
+    member_roles[str(user_id)] = payload.role
+    now = _iso_now()
+    t = _table()
+    t.update_item(
+        Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
+        UpdateExpression="SET member_roles=:roles, updated_at=:upd",
+        ExpressionAttributeValues={":roles": member_roles, ":upd": now},
+    )
+    t.update_item(
+        Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"},
+        UpdateExpression="SET member_role=:role, updated_at=:upd",
+        ExpressionAttributeValues={":role": payload.role, ":upd": now},
+    )
+    return ConversationMemberUpdateOut(ok=True, conversation_id=conversation_id, user_id=int(user_id), role=payload.role)
+
+
+@router.post("/conversations/{conversation_id}/leave", response_model=ConversationStatusUpdateOut)
+def leave_group_conversation(
+    conversation_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ConversationStatusUpdateOut:
+    _ensure_table_exists()
+    meta = _conversation_meta_or_404(conversation_id)
+    if str(meta.get("conversation_type", "direct")) != "group":
+        raise HTTPException(status_code=400, detail="Only group conversations can be left")
+    member = _member_item_or_404(conversation_id, int(current_user.id))
+    if _normalize_member_status(member.get("conversation_status")) != "accepted":
+        raise HTTPException(status_code=403, detail="Group is not active for this user")
+
+    current_participants = [int(v) for v in meta.get("participant_user_ids", [])]
+    updated_participants = [uid for uid in current_participants if uid != int(current_user.id)]
+    member_roles_raw = meta.get("member_roles", {})
+    member_roles = member_roles_raw if isinstance(member_roles_raw, dict) else {}
+    was_owner = _normalize_member_role(member_roles.get(str(current_user.id))) == "owner"
+    member_roles.pop(str(current_user.id), None)
+
+    owner_user_id = int(meta.get("owner_user_id", current_user.id))
+    if was_owner and updated_participants:
+        admin_ids = [uid for uid in updated_participants if _normalize_member_role(member_roles.get(str(uid))) == "admin"]
+        new_owner = admin_ids[0] if admin_ids else updated_participants[0]
+        member_roles[str(new_owner)] = "owner"
+        owner_user_id = new_owner
+
+    now = _iso_now()
+    t = _table()
+    t.update_item(
+        Key={"PK": f"CONV#{conversation_id}", "SK": "META"},
+        UpdateExpression="SET participant_user_ids=:pids, member_roles=:roles, owner_user_id=:owner, updated_at=:upd",
+        ExpressionAttributeValues={
+            ":pids": updated_participants,
+            ":roles": member_roles,
+            ":owner": owner_user_id,
+            ":upd": now,
+        },
+    )
+    t.update_item(
+        Key={"PK": f"USER#{current_user.id}", "SK": f"CONV#{conversation_id}"},
+        UpdateExpression="SET conversation_status=:status, participant_user_ids=:pids, unread_count=:uc, updated_at=:upd",
+        ExpressionAttributeValues={":status": "left", ":pids": updated_participants, ":uc": 0, ":upd": now},
+    )
+    for uid in updated_participants:
+        update_expr = "SET participant_user_ids=:pids, updated_at=:upd"
+        values: dict = {":pids": updated_participants, ":upd": now}
+        if was_owner and uid == owner_user_id:
+            update_expr += ", member_role=:role"
+            values[":role"] = "owner"
+        t.update_item(
+            Key={"PK": f"USER#{uid}", "SK": f"CONV#{conversation_id}"},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=values,
+        )
+
+    return ConversationStatusUpdateOut(ok=True, conversation_id=conversation_id, conversation_status="left")
+
+
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
 def list_messages(
     conversation_id: str,
@@ -419,6 +848,9 @@ def list_messages(
     ).get("Item")
     if member_item is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
+    member_status = _normalize_member_status((member_item or {}).get("conversation_status"))
+    if member_status in {"left", "removed", "rejected", "archived"}:
+        raise HTTPException(status_code=403, detail="Conversation is not active for this user")
 
     result = t.query(
         KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
@@ -472,7 +904,7 @@ async def send_message(
     sender_status = _normalize_member_status((member_item or {}).get("conversation_status"))
     if sender_status == "request":
         raise HTTPException(status_code=403, detail="Accept the conversation request before sending messages")
-    if sender_status in {"rejected", "archived"}:
+    if sender_status in {"rejected", "archived", "left", "removed", "invited"}:
         raise HTTPException(status_code=403, detail="Conversation is not active for this user")
 
     if payload.message_type == "text" and not (payload.body and payload.body.strip()):
@@ -486,14 +918,21 @@ async def send_message(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     participant_ids = [int(v) for v in meta.get("participant_user_ids", [])]
-    if len(participant_ids) == 2:
+    conversation_type = str(meta.get("conversation_type", "direct"))
+    if conversation_type == "group" and int(current_user.id) not in participant_ids:
+        raise HTTPException(status_code=403, detail="Conversation is not active for this user")
+    if conversation_type == "direct" and len(participant_ids) == 2:
         other_user_id = participant_ids[0] if participant_ids[1] == int(current_user.id) else participant_ids[1]
         _ensure_not_blocked_between(db, int(current_user.id), int(other_user_id))
 
     now = _iso_now()
     message_id = str(uuid4())
     body = payload.body.strip() if payload.body else None
-    preview = body or (f"Shared post #{payload.shared_post_id}" if payload.shared_post_id is not None else "")
+    preview_body = body or (f"Shared post #{payload.shared_post_id}" if payload.shared_post_id is not None else "")
+    preview = preview_body
+    if conversation_type == "group" and preview_body:
+        sender_name = current_user.display_name or current_user.username or "Someone"
+        preview = f"{sender_name}: {preview_body}"
 
     t.put_item(
         Item={
@@ -516,7 +955,15 @@ async def send_message(
         ExpressionAttributeValues={":lma": now, ":lmp": preview, ":upd": now},
     )
 
+    active_participant_ids: list[int] = []
     for uid in participant_ids:
+        participant_member = t.get_item(
+            Key={"PK": f"USER#{uid}", "SK": f"CONV#{conversation_id}"}
+        ).get("Item")
+        if _normalize_member_status((participant_member or {}).get("conversation_status")) == "accepted":
+            active_participant_ids.append(uid)
+
+    for uid in active_participant_ids:
         incr = 0 if uid == current_user.id else 1
         try:
             t.update_item(
@@ -542,7 +989,7 @@ async def send_message(
                     "SK": f"CONV#{conversation_id}",
                     "entity_type": "member",
                     "conversation_id": conversation_id,
-                    "conversation_type": str(meta.get("conversation_type", "direct")),
+                    "conversation_type": conversation_type,
                     "participant_user_ids": participant_ids,
                     "user_id": uid,
                     "last_message_at": now,
@@ -556,7 +1003,7 @@ async def send_message(
 
     wrote_notifications = False
     try:
-        for uid in participant_ids:
+        for uid in active_participant_ids:
             if int(uid) == int(current_user.id):
                 continue
             recipient_member = t.get_item(
@@ -763,6 +1210,9 @@ async def ws_conversation(
         Key={"PK": f"USER#{user_id}", "SK": f"CONV#{conversation_id}"}
     ).get("Item")
     if member is None:
+        await websocket.close(code=4003)
+        return
+    if _normalize_member_status((member or {}).get("conversation_status")) in {"left", "removed", "rejected", "archived"}:
         await websocket.close(code=4003)
         return
 

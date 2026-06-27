@@ -313,6 +313,20 @@ class VoiceLiveEndIn(BaseModel):
     user_id: int = Field(gt=0)
 
 
+class VoiceLiveConnectionIn(BaseModel):
+    user_id: int = Field(gt=0)
+    role: str = Field(default="viewer", pattern="^(host|speaker|viewer)$")
+
+
+class VoiceLiveConnectionOut(BaseModel):
+    provider: str
+    server_url: str
+    token: str
+    room_name: str
+    identity: str
+    can_publish: bool
+
+
 try:
     VoiceTakeReplyOut.model_rebuild()
 except AttributeError:
